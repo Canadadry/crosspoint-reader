@@ -343,7 +343,18 @@ in `.claude/skills/` use (`git-commit`, `tdd`, `check-build`):
    - the device side of the modify hook (`clearBookCache`);
    - progress reporting through a function-pointer-plus-context callback.
 
-   *Verified by*: `pio run` and a code review against the rules in section 2.
+   *Verified by*: `pio run` and a code review against the rules in section 2, plus:
+   - the review names each status-returning call the glue makes and the `LOG_ERR` that
+     handles its failure: `GitTreeParser::hasError()`, `isTruncated()` and
+     `wasAborted()`; every non-`Ok` `SyncPlanStatus`; every `RecordStatus` other than
+     `Record` and `End`; every non-`Ok` `SyncRunResult`;
+   - a grep of the step's diff finds no `std::hash`, `"epub_"`, `"txt_"`, `"xtc_"`,
+     `"/.crosspoint/bookmarks"` or `".json"` literal in the new `src/` glue: cache paths
+     come from `bookCacheDir` / `formatBookCacheDir` (`lib/BookCachePath/`), bookmark
+     paths from `BookmarkUtil::getBookmarkPath`;
+   - one named budget constant in `lib/GitSync/` replaces the 64 KB literals in the
+     `SyncPlanner` and `SyncExecutor` `static_assert`s, and the step notes write out the
+     arithmetic showing that the objects the glue holds at the same moment fit it.
 10. **`GitSyncActivity`.** It handles the Wi-Fi connect flow, the progress screen, Back as
    cancel, the summary or error screen, and `preventAutoSleep() == true`. Its tr() strings
    go in `english.yaml` and `french.yaml`. The sync runs in the context that already runs
@@ -380,7 +391,9 @@ in `.claude/skills/` use (`git-commit`, `tdd`, `check-build`):
     - the stack high-water mark of the sync's context (`uxTaskGetStackHighWaterMark`),
       logged after a run that includes a TLS fetch, with at least 1 KB left;
     - Wi-Fi drops mid-download and the next run recovers;
-    - free heap stays at or above 50 KB during a sync (`LOG_DBG` `ESP.getFreeHeap()`).
+    - free heap stays at or above 50 KB during a sync (`LOG_DBG` `ESP.getFreeHeap()`);
+      the log shows free heap before the sync and the lowest value during it, so the
+      measured peak can be compared with the 64 KB budget.
 
     *Verified by*: the doc renders and every step matches the implemented behaviour.
 
@@ -557,3 +570,28 @@ Done 2026-10-11 by the owner, with curl from macOS and a fine-grained token sent
   before any migration rename so a migrated epub cache is not wiped.
 - Tests: `test/git_sync_executor/` (78 cases, about 2 s). Build net green. No `guideline`
   decisions.
+
+### Step 2.7
+
+- `lib/GitSync/GitSyncConfig.{h,cpp}`: `parseGitSyncConfig(json, len, GitSyncConfig&)`
+  over `StreamingJsonParser`, with fixed buffers: owner 39, repo 100, branch 255,
+  token 255 (653 B, never a stack local). An absent branch becomes `main`; unknown keys
+  are ignored; any failure zeroes the output. Statuses: Ok, NotFound, ReadError,
+  TooLarge (over 1 KB), Malformed, MissingField, InvalidField and OutOfMemory, with the
+  field named.
+- URL-safe alphabets, so step 9 concatenates URLs without escaping: owner
+  `[A-Za-z0-9-]`, repo `[A-Za-z0-9._-]` (not `.` or `..`), branch `[A-Za-z0-9._/-]`
+  plus git's ref rules, token visible ASCII without `\`.
+- `src/network/GitSyncConfigLoader.{h,cpp}`: `git_sync_config::load(config)` and
+  `exists()`. `exists()` means present and valid, re-read on each call because USB mode
+  can rewrite the file. Logs are the constant verdict text and, on success, owner, repo
+  and branch at debug level; the token is never logged, and buffers are wiped with
+  volatile stores.
+- JSON engine: `StreamingJsonParser`, not ArduinoJson (host-testable, no `String`).
+- Tests: `test/git_sync_config/` (36 cases). Build net green. No `guideline` decisions.
+- End of phase 1 (`warn-review`, then `plan-review`), three accepted method changes:
+  step 9's *Verified by* gains a logging review of every status, a grep against inline
+  cache and bookmark path derivation, and one named 64 KB budget constant with the
+  arithmetic written in its note; step 12's checklist logs the lowest free heap during
+  a sync. The other warnings (duplicated path literals, header hygiene, naming) were
+  judged not to change the odds of the remaining steps.

@@ -24,7 +24,7 @@
     - [x] Moves and reading-state migration
     - [x] Planner wiring and system tests
 - [ ] Phase 2 — Device integration
-  - [ ] Step 2.7 — Config loader
+  - [x] Step 2.7 — Config loader
     - [x] Config parser
     - [x] Device loader
   - [ ] Step 2.8 — HTTP additions
