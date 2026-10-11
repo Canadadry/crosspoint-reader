@@ -37,6 +37,16 @@ Welcome to the **CrossPoint** firmware. This guide outlines the hardware control
       - [Cover settings](#cover-settings)
       - [Custom images](#custom-images)
     - [3.8 Custom Fonts (SD Card)](#38-custom-fonts-sd-card)
+    - [3.9 GitHub Library Sync](#39-github-library-sync)
+      - [What You Need](#what-you-need)
+      - [Creating the Access Token](#creating-the-access-token)
+      - [Writing the Configuration File](#writing-the-configuration-file)
+      - [Preparing the First Sync](#preparing-the-first-sync)
+      - [Running an Update](#running-an-update)
+      - [What Update Changes](#what-update-changes)
+      - [What Update Never Touches](#what-update-never-touches)
+      - [Limits and Skipped Files](#limits-and-skipped-files)
+      - [Messages and What to Do](#messages-and-what-to-do)
   - [4. Reading Mode](#4-reading-mode)
     - [Page Turning](#page-turning)
     - [Chapter Navigation](#chapter-navigation)
@@ -107,7 +117,7 @@ Upon turning the device on for the first time, you will be placed on the **[Home
 
 ### 3.1 Home Screen
 
-The Home screen is the main entry point to the firmware. From here you can navigate to **[Reading Mode](#4-reading-mode)** with the most recently read book, the **[Browse Files](#33-browse-files-screen)** screen, the **[Recent Books](#34-recent-books-screen)** screen, the **[File Transfer](#35-file-transfer-screen)** screen, or **[Settings](#36-settings)**.
+The Home screen is the main entry point to the firmware. From here you can navigate to **[Reading Mode](#4-reading-mode)** with the most recently read book, the **[Browse Files](#33-browse-files-screen)** screen, the **[Recent Books](#34-recent-books-screen)** screen, the **[File Transfer](#35-file-transfer-screen)** screen, or **[Settings](#36-settings)**. When a GitHub sync configuration is set up, the Home screen also shows **Update Library** (see [GitHub Library Sync](#39-github-library-sync)).
 
 ### 3.2 Reading Mode
 
@@ -569,6 +579,162 @@ See [docs/sd-card-fonts.md](./docs/sd-card-fonts.md) for full installation detai
 
 ---
 
+### 3.9 GitHub Library Sync
+
+CrossPoint can mirror a private GitHub repository of books onto the SD card. You add, change, rename, move or delete books by pushing to the repository, then select **Update Library** on the **[Home](#31-home-screen)** screen to bring the card up to date. The sync is one-way (nothing is ever sent to GitHub) and only runs when you select **Update Library**. The entry appears only when the configuration file described below is present and valid.
+
+#### What You Need
+
+- A GitHub account.
+- A private repository holding your books as plain files. Git LFS is not supported: with LFS, the reader would download small pointer files instead of your books.
+- A computer with an SD card reader, for the one-time setup.
+- A Wi-Fi network, either saved on the reader or entered when asked.
+
+#### Creating the Access Token
+
+The reader reads your repository with a fine-grained personal access token. On github.com:
+
+1. Open **Settings → Developer settings → Personal access tokens → Fine-grained tokens**, then select **Generate new token**.
+2. Give it a name, for example "CrossPoint reader".
+3. **Expiration**: choose a date. 90 days or less is recommended (see the warning below). "No expiration" works, but is not recommended.
+4. **Repository access**: choose **Only select repositories**, then select your books repository and nothing else.
+5. **Permissions → Repository permissions**: set **Contents** to **Read-only**. GitHub adds **Metadata: Read-only** by itself; nothing else is needed.
+6. Generate the token and copy it now: GitHub shows it only once.
+
+If the repository belongs to an organization, the organization may have to approve fine-grained tokens before this one works.
+
+> [!WARNING]
+> The connection to GitHub is encrypted, but the reader does **not** check GitHub's certificate (the same as for OPDS, KOReader sync and the firmware update check). On a network you do not trust, someone in the middle could read your token. Because the token can only read this one repository, the damage is limited to someone reading your books. Protect yourself by giving the token an expiry date, syncing on Wi-Fi you trust, and revoking the token on GitHub (same page, **Revoke**) if you think it leaked.
+>
+> When the token expires, Update shows "Cannot read the repository. Check token, name and Wi-Fi." Generate a new token and replace the `token` value in the configuration file.
+
+#### Writing the Configuration File
+
+The sync is configured by one file on the SD card: `/.crosspoint/github-sync.json`. The token cannot be typed or edited on the device, so write this file from a computer.
+
+> [!TIP]
+> `.crosspoint` is a hidden folder on macOS (in Finder, press **Cmd+Shift+.** to show it) and on Linux. The reader creates it on first boot.
+
+Copy this example and replace the three placeholders with your own values:
+
+```json
+{
+  "owner": "your-github-username",
+  "repo": "your-books-repository",
+  "branch": "main",
+  "token": "github_pat_PASTE_YOUR_TOKEN_HERE"
+}
+```
+
+| Field    | Required | Rules                                                                                                                  |
+| -------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `owner`  | yes      | The user or organization that owns the repository. Letters, digits and `-`; up to 39 characters.                      |
+| `repo`   | yes      | The repository name. Letters, digits, `.`, `_` and `-`, but not `.` or `..`; up to 100 characters.                    |
+| `branch` | no       | Defaults to `main`. Letters, digits, `.`, `_`, `/` and `-`, following git's branch-name rules; up to 255 characters. |
+| `token`  | yes      | The token from the previous step. Visible ASCII characters, with no spaces and no `\`; up to 255 characters.           |
+
+Behavior notes:
+
+- The whole file must be at most 1 KB (1,024 bytes) of plain UTF-8 text. An empty file is invalid.
+- Use a plain-text editor. Word processors, and macOS TextEdit in rich-text mode, turn `"` into curly quotes, which breaks the file.
+- Each field must be a text value in quotes and appear only once. Other keys are ignored, as long as their value is not a nested object or list.
+- When the file is missing or invalid, **Update Library** does not appear on the Home screen. An invalid file is reported on the serial log by a `GSYNC` line that names the problem and the field (see [Troubleshooting](#7-troubleshooting-issues--escaping-bootloop); `--filter GSYNC` shows only these lines). The token itself is never logged.
+- The Home screen checks the file each time you return to it, so a new or fixed file makes the entry appear the next time you go back to the Home screen, without a restart.
+- If the file becomes invalid after the entry was shown, selecting **Update Library** shows "Sync settings missing or invalid" and "Fix /.crosspoint/github-sync.json from a computer", and Wi-Fi is not started.
+
+> [!NOTE]
+> The **[File Transfer](#35-file-transfer-screen)** web interface and WebDAV refuse every path inside `.crosspoint` (and inside any folder whose name starts with `.`): the configuration file cannot be listed, downloaded, replaced, renamed, moved or deleted over the network. Write the file with the card in a computer. On the device, **Browse Files** shows `.crosspoint` only when **Settings → System → Show Hidden Files** is on.
+
+#### Preparing the First Sync
+
+The first sync can reuse the books you copy to the card yourself, so it does not have to download your whole library over Wi-Fi.
+
+1. Write the configuration file (see above).
+2. On your computer, get the repository's files (a fresh download from GitHub or an existing working copy) and **copy** them to the root of the SD card, keeping their folders. The repository's files always land at the root of the card: `Novels/Dune.epub` in the repository becomes `/Novels/Dune.epub` on the card. Files and folders whose name starts with `.` (such as `.git` or `.github`) do not need to be copied: the sync ignores them.
+3. Do not `git clone` the repository onto the card. If you did, delete the `.git` folder from the card: it doubles the space used, and the reader changes files without updating it, so a later `git pull` on the card from a computer would refuse ("local changes would be overwritten"). A leftover `.git` folder is never touched by the sync.
+4. Put the card back in the reader, return to the Home screen and select **Update Library**.
+5. The first Update checks every copied file against the repository instead of downloading it, and counts it as **Already on card**. This reads the card, not the network, so it takes seconds to minutes rather than hours. A copied file that differs from the repository is replaced by the repository's version, and a repository file missing from the card is downloaded.
+
+You can also skip step 2 and let the first Update download everything. This is slower and uses Wi-Fi for the whole library.
+
+#### Running an Update
+
+1. On the Home screen, select **Update Library**.
+2. Wi-Fi works as in the OPDS browser: if the reader is not already connected, the network selection screen opens. If no connection is made, the screen shows "Wi-Fi connection failed".
+3. The screen shows the current step: "Preparing...", "Reading the repository..." (with the number of files listed so far), then "Comparing with the SD card...". While files are processed, it shows a progress bar and `n/total : name`, under the current action: Moving, Checking, Downloading, Deleting, Removing empty folder or Skipping.
+4. At the end, a summary is shown. Press **Back** or **Confirm** to return to the Home screen.
+
+Behavior notes:
+
+- **Back** stops the sync after the current file ("Stopping after the current file..."). On a touch device, the home gesture also stops the sync, then goes to the Home screen. Select **Update Library** again to resume: only what is left is done.
+- The reader does not go to sleep during a sync.
+- A power cut, a reset or a lost Wi-Fi connection never leaves a half-written book. Each download goes to a temporary file in `/.crosspoint/gitsync/` and replaces the book only once it is complete and verified. The next Update finishes the job.
+- When you leave the sync screen and Wi-Fi was turned on, the reader restarts to the Home screen to free memory, as it does after OPDS browsing.
+
+The summary screen shows:
+
+- "Already up to date" when nothing had to change;
+- otherwise "Library updated" with the **Added**, **Updated**, **Moved**, **Deleted** and **Already on card** counts;
+- "Failed, retried next time" and "Skipped (name conflict)" with their counts, only when they are not zero.
+
+A file counted as failed was not changed on the card, and is retried on the next Update. If the sync stopped early, the screen shows "Sync stopped" or "Sync failed" with the reason (see [Messages and What to Do](#messages-and-what-to-do)).
+
+#### What Update Changes
+
+- New files in the repository are downloaded.
+- Changed files are replaced.
+- Files deleted from the repository are deleted from the card.
+- Renamed and moved files are renamed or moved on the card, without downloading them again.
+- A moved or renamed book keeps its reading progress, bookmarks and Recent Books entry. If it was the book you had open, it is still the book that reopens at start-up.
+- A book whose content changed in the repository starts again from the beginning, like a book re-uploaded through the web interface: its reading cache, which holds the reading position, is cleared. Its bookmarks are kept.
+- After deletions, a folder left empty is removed only if a synced file lived in it.
+- The reader keeps its own record of synced files in `/.crosspoint/gitsync/`.
+
+#### What Update Never Touches
+
+- Any file the sync did not put on the card or adopt: books copied over USB, downloaded from OPDS, uploaded through the web interface or sent from Calibre, screenshots, sleep images.
+- Anything whose path contains a folder or file name starting with `.`, on the card or in the repository: `/.crosspoint/` (settings, reading progress, bookmarks), `/.fonts/`, `.git`, `.github`. Such repository files are not synced, so you can keep notes or CI files in the same repository.
+- Folders that never held a synced file, even when they are empty.
+
+> [!IMPORTANT]
+> There is one exception: when the repository has a file at the same path as one of your own files, the repository's version replaces yours. The card does not distinguish upper and lower case, so `Books/Dune.epub` and `books/dune.EPUB` are the same file. Keep your own books in folders the repository does not use.
+
+Update trusts its record of synced files. A synced book that you rename, move or delete on the device (with **Browse Files**, the web interface, or **Move Finished Books to Read Folder**) is not noticed, and is not put back until it changes in the repository. Make such changes in the repository instead, and turn **Settings → System → Move Finished Books to Read Folder** off if your library is synced.
+
+#### Limits and Skipped Files
+
+- **2,000 files**: a repository may hold up to 2,000 synced files. Files under folders starting with `.` do not count. A larger repository is refused with "Too many files (limit 2000)." and nothing is changed.
+- **GitHub's list size**: GitHub lists at most 100,000 entries (7 MB of list) in one answer. Beyond that, the sync stops with "Repository too large for GitHub's file list." and nothing is changed.
+- **Path length and form**: paths of up to 255 bytes are synced (UTF-8: an accented letter counts as 2 bytes). A path that is longer, has a file or folder name starting with a space, or contains a control character is ignored and logged.
+- **Characters the card refuses**: a name containing `:`, `*`, `?`, `"`, `<`, `>` or `|` cannot exist on the card. Such files are skipped and counted under "Skipped (name conflict)". A name containing `\` is ignored and logged.
+- **Names differing only by case**: when two repository paths differ only by upper and lower case, one is synced (the one already synced, otherwise the first in byte order). The others are skipped on every run, counted under "Skipped (name conflict)", and never deleted. Rename them in the repository.
+
+#### Messages and What to Do
+
+| Message                                                    | Meaning and what to do                                                                                                                                                                                     |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Already up to date                                         | Nothing to do.                                                                                                                                                                                             |
+| Failed, retried next time: N                               | A download failed or arrived damaged. The file is retried on the next Update. If it keeps failing, check the file on GitHub.                                                                              |
+| Skipped (name conflict): N                                 | Two names differ only by case, or a name has a character the card refuses. Rename the file in the repository (see [Limits and Skipped Files](#limits-and-skipped-files)).                                 |
+| Sync stopped / Press Update again to resume.               | You pressed **Back**. Select **Update Library** to finish.                                                                                                                                                 |
+| Network lost. Press Update again to resume.                | Downloads failed on three files in a row (Wi-Fi or GitHub). Move closer to the router and run Update again.                                                                                                |
+| Cannot read the repository. Check token, name and Wi-Fi.   | Wrong `owner`, `repo` or `branch`; expired or revoked token; token without access to this repository; or no internet. Check the configuration file and the token.                                          |
+| GitHub sent an invalid file list.                          | GitHub's answer was not what the reader expected, often because of a captive portal or proxy. Try again on another network.                                                                               |
+| Repository too large for GitHub's file list.               | See [Limits and Skipped Files](#limits-and-skipped-files).                                                                                                                                                 |
+| Too many files (limit 2000).                               | See [Limits and Skipped Files](#limits-and-skipped-files).                                                                                                                                                 |
+| GitHub redirected to another site. Sync stopped.           | The reader refused to send your token to another site, and stopped. This should not happen with GitHub: sync on another network, and consider revoking the token.                                         |
+| Sync record damaged. See the user guide.                   | Reset the sync record (see below) and run Update again.                                                                                                                                                    |
+| SD card error. Check the card.                             | Check the card on a computer, then run Update again.                                                                                                                                                       |
+| Not enough memory. Restart and try again.                  | Restart the reader and run Update before opening anything else.                                                                                                                                           |
+| Sync settings missing or invalid                           | See [Writing the Configuration File](#writing-the-configuration-file).                                                                                                                                     |
+| Wi-Fi connection failed                                    | No network was joined. Select **Update Library** again and choose a network.                                                                                                                               |
+
+Files already processed before a sync stopped stay done; the next Update carries on from there.
+
+**Resetting the sync record.** Delete the `/.crosspoint/gitsync/` folder from a computer. The next Update treats every repository file as in a first sync: files that are still identical are adopted, the others are downloaded. The cost: books deleted or moved in the repository since the last good sync stay on the card at their old path and are no longer managed by the sync. Delete them by hand.
+
+---
+
 ## 4. Reading Mode
 
 Once you have opened a book, the button layout changes to facilitate reading.
@@ -728,4 +894,4 @@ Press **Ctrl-C** or close the graph window to exit.
 
 If the device is stuck in a bootloop, press and release the Reset button. Then, press and hold on to the configured Back button and the Power Button to boot to the Home Screen.
 
-There can be issues with broken cache or config. In this case, delete the `.crosspoint` directory on your SD card (or consider deleting only `settings.json`, `state.json`, or `epub_*` cache directories in the `.crosspoint/` folder).
+There can be issues with broken cache or config. In this case, delete the `.crosspoint` directory on your SD card (or consider deleting only `settings.json`, `state.json`, or `epub_*` cache directories in the `.crosspoint/` folder). Deleting the whole `.crosspoint` directory also deletes the GitHub sync configuration (`github-sync.json`) and the sync record: keep a copy of the configuration file and put it back afterwards, and the next Update re-adopts the books already on the card (see **Resetting the sync record** in [Messages and What to Do](#messages-and-what-to-do)).

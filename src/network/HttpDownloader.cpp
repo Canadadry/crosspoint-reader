@@ -9,6 +9,8 @@
 #include <functional>
 #include <string>
 
+#include "util/UrlOrigin.h"
+
 #if defined(FREEINK_NET_WOLFSSL)
 #include <SecureHttpClient.h>
 
@@ -40,10 +42,23 @@ struct Sink {
   bool* cancelFlag = nullptr;
   size_t total = 0;
   size_t downloaded = 0;
+  HttpDownloader::RequestOptions options;
 };
 
 bool isRedirect(int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+}
+
+bool hasCredentials(const std::string& username, const std::string& password) {
+  return !username.empty() && !password.empty();
+}
+
+bool hasExtraHeader(const HttpDownloader::RequestOptions& options) {
+  return options.headerName && options.headerName[0] != '\0' && options.headerValue && options.headerValue[0] != '\0';
+}
+
+bool guardRedirects(const std::string& username, const std::string& password, const Sink& sink) {
+  return sink.options.refuseCrossOriginRedirect && hasCredentials(username, password);
 }
 
 // OtaUpdater.cpp already disables WiFi power-save for firmware downloads, but
@@ -81,11 +96,12 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
     // append a second User-Agent header, which strict servers reject (aiohttp
     // answers 400 "Duplicate 'User-Agent' header found").
     http.setUserAgent("CrossPoint-ESP32-" CROSSPOINT_VERSION);
-    if (!username.empty() && !password.empty()) {
+    if (hasCredentials(username, password)) {
       const std::string credentials = username + ":" + password;
       const String encoded = base64::encode(credentials.c_str());
       http.addHeader("Authorization", std::string("Basic ") + encoded.c_str());
     }
+    if (hasExtraHeader(sink.options)) http.addHeader(sink.options.headerName, sink.options.headerValue);
 
     LOG_DBG("HTTP", "wolfSSL GET: %s", url.c_str());
     const int status = http.GET(
@@ -109,6 +125,13 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
       if (location.empty() || !freeink::SecureHttpClient::resolveUrl(url, location, url)) {
         LOG_ERR("HTTP", "wolfSSL bad redirect: %d", status);
         return HttpDownloader::HTTP_ERROR;
+      }
+      if (guardRedirects(username, password, sink) && !sameOrigin(startUrl, url)) {
+        UrlOrigin target{};
+        const bool parsed = parseUrlOrigin(url, target);
+        const std::string host = parsed ? std::string(target.host) : std::string("?");
+        LOG_ERR("HTTP", "wolfSSL cross-origin redirect refused: %d to %s", status, host.c_str());
+        return HttpDownloader::REDIRECT_REFUSED;
       }
       continue;
     }
@@ -158,11 +181,14 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   }
 
   esp_http_client_set_header(client, "User-Agent", "CrossPoint-ESP32-" CROSSPOINT_VERSION);
-  if (!username.empty() && !password.empty()) {
+  if (hasCredentials(username, password)) {
     // Preemptive Basic auth, like the prior addHeader; don't wait for a 401.
     const std::string credentials = username + ":" + password;
     const String header = "Basic " + base64::encode(credentials.c_str());
     esp_http_client_set_header(client, "Authorization", header.c_str());
+  }
+  if (hasExtraHeader(sink.options)) {
+    esp_http_client_set_header(client, sink.options.headerName, sink.options.headerValue);
   }
 
   // open()/read() does not auto-follow redirects (only perform() does), so step
@@ -177,6 +203,12 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
   int64_t contentLength = esp_http_client_fetch_headers(client);
   int status = esp_http_client_get_status_code(client);
   for (int hop = 0; isRedirect(status) && hop < MAX_REDIRECTS; ++hop) {
+    // The target is not read here, so a guarded authenticated request refuses every redirect.
+    if (guardRedirects(username, password, sink)) {
+      LOG_ERR("HTTP", "redirect refused: %d", status);
+      esp_http_client_cleanup(client);
+      return HttpDownloader::REDIRECT_REFUSED;
+    }
     if (esp_http_client_set_redirection(client) != ESP_OK) break;
     esp_http_client_close(client);
     err = esp_http_client_open(client, 0);
@@ -276,6 +308,16 @@ bool HttpDownloader::fetchUrl(const std::string& url, const DataCallback& onData
   Sink sink;
   sink.write = onData;
   return runGetSecure(url, username, password, sink) == OK;
+}
+
+HttpDownloader::DownloadError HttpDownloader::fetchStream(const std::string& url, const DataCallback& onData,
+                                                          const std::string& username, const std::string& password,
+                                                          const RequestOptions& options) {
+  LOG_DBG("HTTP", "Fetching: %s", url.c_str());
+  Sink sink;
+  sink.write = onData;
+  sink.options = options;
+  return runGetSecure(url, username, password, sink);
 }
 
 HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& url, const std::string& destPath,
