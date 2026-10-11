@@ -363,3 +363,68 @@ if (parsedSize != fileSize) {
     std::warning(std::format("Unparsed data detected: {} bytes remaining at offset 0x{:X}", fileSize - parsedSize, parsedSize));
 }
 ```
+
+## GitHub sync record files (`tree.tmp`, manifest)
+
+### Version 1
+
+The GitHub library sync stores two lists in one record format, written by
+`RecordWriter` and read by `RecordReader` (`lib/GitSync/`): the remote tree
+listing, `/.crosspoint/gitsync/tree.tmp`, and the sync's manifest of every path
+it owns. Unlike the cache files above, every integer is little-endian and
+assembled byte by byte, with no padding and no packed struct, and every frame
+carries a CRC-32 (IEEE 802.3, reflected, polynomial `0xEDB88320`).
+
+File header, 8 bytes:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | magic `GSRF` |
+| 4 | 1 | format version, `RECORD_FILE_VERSION = 1` |
+| 5 | 1 | file kind: 1 = tree, 2 = manifest |
+| 6 | 2 | reserved, must be 0 |
+
+Frame, 7 bytes followed by the body:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | frame kind: `'P'` entry, `'D'` drop, `'S'` seal |
+| 1 | 2 | body length |
+| 3 | 4 | CRC-32 over the frame kind, the body length bytes and the body |
+| 7 | n | body |
+
+Bodies:
+
+- **Entry (`'P'`)**: `sha[20]`, `size` u64, `replaces` u32, then the path bytes
+  (UTF-8, no terminator). The path length is the body length minus 32, from 1
+  to 255 bytes. `replaces` is `0xFFFFFFFF` (none) or the offset of an earlier
+  entry frame. The largest frame is 294 bytes.
+- **Drop (`'D'`)**: `target` u32, the offset of an earlier entry frame.
+- **Seal (`'S'`)**: `count` u32, the number of entry frames before it.
+
+An offset is the byte position of a frame's first byte in the file, so it is
+at least 8.
+
+Grammar:
+
+- **Tree**: header, entries with no `replaces`, one seal whose count matches,
+  end of file. A tree without its seal is truncated, never a shorter tree.
+- **Manifest**: header, the base (entries with no `replaces`, then one seal
+  whose count matches), then an append-only journal of entry and drop frames
+  and no further seal. Each applied sync operation appends one frame: an entry
+  with `replaces` set for a modify or a move, an entry without it for an add,
+  a drop for a delete.
+
+Torn tail: in a manifest journal only, a last frame cut off by the end of the
+file, or complete but failing its CRC with nothing after it, is ignored as an
+append that never happened. A CRC failure followed by more bytes, or any defect
+up to the end of the seal, makes the file corrupt.
+
+Compaction (`ManifestCompactor`) folds the journal into a fresh base: every
+entry frame that no drop or `replaces` names, in file order, with no
+`replaces`, then the seal. A target named twice, or one naming no entry frame,
+makes the manifest corrupt.
+
+A file with the right magic and another version is reported as a wrong
+version, before anything else is read. Any change to this layout bumps
+`RECORD_FILE_VERSION` in `lib/GitSync/RecordFormat.h`.

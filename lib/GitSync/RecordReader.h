@@ -16,6 +16,9 @@ class RecordReader {
   // Record fills record; any other status repeats on every later call.
   RecordStatus next(SyncRecord& record);
 
+  // Seeks the source to the file's first byte and reads the file afresh; false when the seek is refused.
+  bool rewind();
+
   // Reads the entry frame at offset, checked against its CRC but not against the rest of the file:
   // the caller already read that file to End. inJournal reads false. Corrupt for an offset that is not
   // an entry frame, IoError when the source refuses the seek. next() must not be called afterwards.

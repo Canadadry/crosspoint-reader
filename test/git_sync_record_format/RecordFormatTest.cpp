@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "Crc32.h"
+#include "ManifestCompactor.h"
 #include "MemoryRecordStream.h"
 #include "RecordReader.h"
 #include "RecordWriter.h"
@@ -1143,4 +1144,216 @@ TEST(ManifestFileTest, TornEndRepeatsOnEveryLaterCall) {
   EXPECT_EQ(reader.next(record), RecordStatus::End);
   EXPECT_TRUE(reader.tornTail());
   EXPECT_EQ(reader.endOffset(), manifest.records.back().offset);
+}
+
+namespace {
+
+struct Compacted {
+  CompactResult result;
+  std::vector<uint8_t> bytes;
+};
+
+Compacted compact(std::vector<uint8_t>& input, uint32_t* scratch, size_t capacity, size_t length = SIZE_MAX) {
+  MemoryRecordStream source(input.data(), input.size(), length);
+  Compacted out{{}, std::vector<uint8_t>(FILE_CAPACITY)};
+  MemoryRecordStream sink(out.bytes.data(), out.bytes.size());
+  ManifestCompactor compactor(source, sink);
+  out.result = compactor.compact(scratch, capacity);
+  out.bytes.resize(sink.length());
+  return out;
+}
+
+std::vector<ReadRecord> baseEntries(const std::vector<ReadRecord>& records) {
+  std::vector<ReadRecord> base;
+  for (const ReadRecord& record : records) {
+    if (!record.inJournal) base.push_back(record);
+  }
+  return base;
+}
+
+// Compares path, size and SHA only: offsets move and replaces is cleared by compaction.
+void expectSameLiveEntries(const std::vector<ReadRecord>& actual, const std::vector<ReadRecord>& expected) {
+  ASSERT_EQ(actual.size(), expected.size());
+  for (size_t i = 0; i < actual.size(); ++i) {
+    SCOPED_TRACE(i);
+    EXPECT_EQ(actual[i].kind, RecordFrameKind::Entry);
+    EXPECT_FALSE(actual[i].inJournal);
+    EXPECT_EQ(actual[i].replaces, NO_OFFSET);
+    EXPECT_EQ(actual[i].path, expected[i].path);
+    EXPECT_EQ(actual[i].size, expected[i].size);
+    EXPECT_EQ(memcmp(actual[i].sha, expected[i].sha, GitBlobHasher::SHA_SIZE), 0);
+  }
+}
+
+}  // namespace
+
+TEST(ManifestCompactorTest, BaseWithoutJournalKeepsEveryEntry) {
+  WrittenManifest manifest = writeManifest();
+  manifest.bytes.resize(manifest.sealEnd);
+  const std::vector<ReadRecord> base = baseEntries(manifest.records);
+
+  Compacted out = compact(manifest.bytes, nullptr, 0);
+
+  EXPECT_EQ(out.result.status, CompactStatus::Ok);
+  EXPECT_EQ(out.result.liveCount, base.size());
+  EXPECT_FALSE(out.result.tornTailDropped);
+  const ManifestRead read = readManifest(out.bytes);
+  EXPECT_EQ(read.status, RecordStatus::End);
+  expectSameLiveEntries(read.records, base);
+}
+
+// writeManifest's journal leaves the modified a.epub and the moved b.epub, in file order.
+TEST(ManifestCompactorTest, JournalFoldsIntoTheLiveEntries) {
+  WrittenManifest manifest = writeManifest();
+  const std::vector<ReadRecord> live{manifest.records[4], manifest.records[5]};
+  uint32_t scratch[4];
+
+  Compacted out = compact(manifest.bytes, scratch, 4);
+
+  EXPECT_EQ(out.result.status, CompactStatus::Ok);
+  EXPECT_EQ(out.result.liveCount, 2u);
+  EXPECT_FALSE(out.result.tornTailDropped);
+  const ManifestRead read = readManifest(out.bytes);
+  EXPECT_EQ(read.status, RecordStatus::End);
+  EXPECT_EQ(read.endOffset, out.bytes.size());
+  expectSameLiveEntries(read.records, live);
+}
+
+TEST(ManifestCompactorTest, CompactingTheOutputAgainGivesIdenticalBytes) {
+  WrittenManifest manifest = writeManifest();
+  uint32_t scratch[4];
+  Compacted once = compact(manifest.bytes, scratch, 4);
+  ASSERT_EQ(once.result.status, CompactStatus::Ok);
+
+  Compacted twice = compact(once.bytes, nullptr, 0);
+
+  EXPECT_EQ(twice.result.status, CompactStatus::Ok);
+  EXPECT_EQ(twice.result.liveCount, once.result.liveCount);
+  EXPECT_EQ(twice.bytes, once.bytes);
+}
+
+TEST(ManifestCompactorTest, ScratchOneSmallerThanTheTargetsIsScratchFull) {
+  WrittenManifest manifest = writeManifest();
+  uint32_t scratch[4] = {};
+
+  EXPECT_EQ(compact(manifest.bytes, scratch, 3).result.status, CompactStatus::ScratchFull);
+  EXPECT_EQ(compact(manifest.bytes, nullptr, 0).result.status, CompactStatus::ScratchFull);
+  EXPECT_EQ(compact(manifest.bytes, nullptr, 4).result.status, CompactStatus::ScratchFull);
+}
+
+TEST(ManifestCompactorTest, EntryDroppedOrReplacedTwiceIsCorrupt) {
+  const uint32_t a = RECORD_HEADER_SIZE;
+  std::vector<uint8_t> twiceDropped = handBuiltBase();
+  appendFrame(twiceDropped, 'D', u32Body(a));
+  appendFrame(twiceDropped, 'D', u32Body(a));
+  std::vector<uint8_t> replacedThenDropped = handBuiltBase();
+  appendFrame(replacedThenDropped, 'P', entryBody("b.epub", a));
+  appendFrame(replacedThenDropped, 'D', u32Body(a));
+  std::vector<uint8_t> twiceReplaced = handBuiltBase();
+  appendFrame(twiceReplaced, 'P', entryBody("b.epub", a));
+  appendFrame(twiceReplaced, 'P', entryBody("c.epub", a));
+  uint32_t scratch[2];
+
+  EXPECT_EQ(compact(twiceDropped, scratch, 2).result.status, CompactStatus::Corrupt);
+  EXPECT_EQ(compact(replacedThenDropped, scratch, 2).result.status, CompactStatus::Corrupt);
+  EXPECT_EQ(compact(twiceReplaced, scratch, 2).result.status, CompactStatus::Corrupt);
+}
+
+TEST(ManifestCompactorTest, TargetThatIsNotAnEntryFrameIsCorrupt) {
+  const uint32_t a = RECORD_HEADER_SIZE;
+  const auto journal = static_cast<uint32_t>(handBuiltBase().size());
+  const uint32_t seal = journal - FRAME_HEADER_SIZE - OFFSET_BODY_SIZE;
+  std::vector<uint8_t> sealDropped = handBuiltBase();
+  appendFrame(sealDropped, 'D', u32Body(seal));
+  std::vector<uint8_t> sealReplaced = handBuiltBase();
+  appendFrame(sealReplaced, 'P', entryBody("b.epub", seal));
+  std::vector<uint8_t> insideEntryDropped = handBuiltBase();
+  appendFrame(insideEntryDropped, 'D', u32Body(a + 1));
+  std::vector<uint8_t> dropDropped = handBuiltBase();
+  appendFrame(dropDropped, 'D', u32Body(a));
+  appendFrame(dropDropped, 'D', u32Body(journal));
+  uint32_t scratch[2];
+
+  EXPECT_EQ(compact(sealDropped, scratch, 2).result.status, CompactStatus::Corrupt);
+  EXPECT_EQ(compact(sealReplaced, scratch, 2).result.status, CompactStatus::Corrupt);
+  EXPECT_EQ(compact(insideEntryDropped, scratch, 2).result.status, CompactStatus::Corrupt);
+  EXPECT_EQ(compact(dropDropped, scratch, 2).result.status, CompactStatus::Corrupt);
+}
+
+// Cutting the last drop off keeps the journal's new.epub alive.
+TEST(ManifestCompactorTest, TornTailIsDroppedAndReported) {
+  WrittenManifest manifest = writeManifest();
+  const std::vector<ReadRecord> live{manifest.records[3], manifest.records[4], manifest.records[5]};
+  uint32_t scratch[4];
+
+  Compacted out = compact(manifest.bytes, scratch, 4, manifest.bytes.size() - 1);
+
+  EXPECT_EQ(out.result.status, CompactStatus::Ok);
+  EXPECT_TRUE(out.result.tornTailDropped);
+  EXPECT_EQ(out.result.liveCount, 3u);
+  const ManifestRead read = readManifest(out.bytes);
+  EXPECT_EQ(read.status, RecordStatus::End);
+  EXPECT_FALSE(read.tornTail);
+  expectSameLiveEntries(read.records, live);
+}
+
+TEST(ManifestCompactorTest, TruncatedBaseWrongVersionOrSourceErrorIsPassedThrough) {
+  WrittenManifest manifest = writeManifest();
+  uint32_t scratch[4];
+  EXPECT_EQ(compact(manifest.bytes, scratch, 4, manifest.sealEnd - 1).result.status, CompactStatus::Truncated);
+
+  std::vector<uint8_t> otherVersion = manifest.bytes;
+  otherVersion[4] = RECORD_FILE_VERSION + 1;
+  EXPECT_EQ(compact(otherVersion, scratch, 4).result.status, CompactStatus::WrongVersion);
+
+  std::vector<uint8_t> flipped = manifest.bytes;
+  flipped[RECORD_HEADER_SIZE + FRAME_HEADER_SIZE] ^= 0x01;
+  EXPECT_EQ(compact(flipped, scratch, 4).result.status, CompactStatus::Corrupt);
+
+  // The second pass reads the file again, so errors up to twice its size reach it.
+  std::vector<uint8_t> out(FILE_CAPACITY);
+  for (size_t failAt = 0; failAt <= 2 * manifest.bytes.size(); ++failAt) {
+    SCOPED_TRACE(failAt);
+    FailingSource source(manifest.bytes.data(), manifest.bytes.size(), failAt);
+    MemoryRecordStream sink(out.data(), out.size());
+    ManifestCompactor compactor(source, sink);
+    EXPECT_EQ(compactor.compact(scratch, 4).status, CompactStatus::IoError);
+  }
+}
+
+namespace {
+
+class UnseekableSource : public MemoryRecordStream {
+ public:
+  using MemoryRecordStream::MemoryRecordStream;
+  bool seek(uint32_t) override { return false; }
+};
+
+}  // namespace
+
+TEST(ManifestCompactorTest, RefusedRewindIsIoError) {
+  WrittenManifest manifest = writeManifest();
+  UnseekableSource source(manifest.bytes.data(), manifest.bytes.size(), manifest.bytes.size());
+  std::vector<uint8_t> out(FILE_CAPACITY);
+  MemoryRecordStream sink(out.data(), out.size());
+  ManifestCompactor compactor(source, sink);
+  uint32_t scratch[4];
+  EXPECT_EQ(compactor.compact(scratch, 4).status, CompactStatus::IoError);
+}
+
+// Header, the two live entries, then the seal: four writes.
+TEST(ManifestCompactorTest, FailingSinkIsWriteFailed) {
+  WrittenManifest manifest = writeManifest();
+  uint32_t scratch[4];
+  for (size_t failOn = 1; failOn <= 4; ++failOn) {
+    SCOPED_TRACE(failOn);
+    MemoryRecordStream source(manifest.bytes.data(), manifest.bytes.size(), manifest.bytes.size());
+    FailingSink sink(failOn);
+    ManifestCompactor compactor(source, sink);
+    EXPECT_EQ(compactor.compact(scratch, 4).status, CompactStatus::WriteFailed);
+  }
+  MemoryRecordStream source(manifest.bytes.data(), manifest.bytes.size(), manifest.bytes.size());
+  FailingSink sink(5);
+  ManifestCompactor compactor(source, sink);
+  EXPECT_EQ(compactor.compact(scratch, 4).status, CompactStatus::Ok);
 }

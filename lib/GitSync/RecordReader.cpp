@@ -51,6 +51,16 @@ RecordStatus RecordReader::next(SyncRecord& record) {
   return doneStatus;
 }
 
+bool RecordReader::rewind() {
+  if (!source.seek(0)) return false;
+  stage = Stage::Header;
+  doneStatus = RecordStatus::End;
+  position = 0;
+  entryCount = 0;
+  torn = false;
+  return true;
+}
+
 RecordStatus RecordReader::finish(RecordStatus status) {
   stage = Stage::Done;
   doneStatus = status;

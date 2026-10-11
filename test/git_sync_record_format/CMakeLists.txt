@@ -1,6 +1,7 @@
 add_executable(RecordFormatTest
   RecordFormatTest.cpp
   ${REPO_ROOT}/lib/GitSync/Crc32.cpp
+  ${REPO_ROOT}/lib/GitSync/ManifestCompactor.cpp
   ${REPO_ROOT}/lib/GitSync/RecordReader.cpp
   ${REPO_ROOT}/lib/GitSync/RecordWriter.cpp
 )
