@@ -1,0 +1,17 @@
+- [x] Phase 0 — De-risk the GitHub API
+  - [x] Step 0.0 — Owner check of the API from a PC
+- [ ] Phase 1 — Pure logic in lib/GitSync/, host-tested
+  - [ ] Step 1.1 — Git blob hash
+  - [ ] Step 1.2 — Path filter
+  - [ ] Step 1.3 — Trees response parser
+  - [ ] Step 1.4 — Manifest and tree record format
+  - [ ] Step 1.5 — Sync planner
+  - [ ] Step 1.6 — Sync executor
+- [ ] Phase 2 — Device integration
+  - [ ] Step 2.7 — Config loader
+  - [ ] Step 2.8 — HTTP additions
+  - [ ] Step 2.9 — Sync engine glue
+  - [ ] Step 2.10 — GitSyncActivity
+  - [ ] Step 2.11 — Home menu entry
+- [ ] Phase 3 — Documentation and hand-off
+  - [ ] Step 3.12 — User guide
