@@ -38,7 +38,7 @@
     - [x] Sync engine
   - [ ] Step 2.10 — GitSyncActivity
     - [x] Activity shell and strings
-    - [ ] Sync run, progress and summary
+    - [x] Sync run, progress and summary
   - [ ] Step 2.11 — Home menu entry
 - [ ] Phase 3 — Documentation and hand-off
   - [ ] Step 3.12 — User guide
