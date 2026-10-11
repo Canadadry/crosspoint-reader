@@ -33,7 +33,7 @@
   - [ ] Step 2.9 — Sync engine glue
     - [x] Budget constant and pure helpers
     - [x] Tree snapshot writer
-    - [ ] Sync run
+    - [x] Sync run
     - [ ] HalStorage adapter
     - [ ] Sync engine
   - [ ] Step 2.10 — GitSyncActivity
