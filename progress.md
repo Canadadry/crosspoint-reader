@@ -28,6 +28,8 @@
     - [x] Config parser
     - [x] Device loader
   - [ ] Step 2.8 — HTTP additions
+    - [x] URL origin helper
+    - [ ] HttpDownloader wiring
   - [ ] Step 2.9 — Sync engine glue
   - [ ] Step 2.10 — GitSyncActivity
   - [ ] Step 2.11 — Home menu entry
