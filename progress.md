@@ -27,7 +27,7 @@
   - [x] Step 2.7 — Config loader
     - [x] Config parser
     - [x] Device loader
-  - [ ] Step 2.8 — HTTP additions
+  - [x] Step 2.8 — HTTP additions
     - [x] URL origin helper
     - [x] HttpDownloader wiring
   - [ ] Step 2.9 — Sync engine glue

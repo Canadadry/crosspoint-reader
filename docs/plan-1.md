@@ -595,3 +595,28 @@ Done 2026-10-11 by the owner, with curl from macOS and a fine-grained token sent
   arithmetic written in its note; step 12's checklist logs the lowest free heap during
   a sync. The other warnings (duplicated path literals, header hygiene, naming) were
   judged not to change the odds of the remaining steps.
+
+### Step 2.8
+
+- `src/util/UrlOrigin.{h,cpp}`: `parseUrlOrigin` and `sameOrigin` compare scheme, host
+  (ignoring case) and effective port; they fail closed on userinfo, IPv6 literals and bad
+  ports. Pure and host-tested (`test/url_origin/`, 7 cases).
+- `HttpDownloader` gains `RequestOptions {headerName, headerValue,
+  refuseCrossOriginRedirect}`, `REDIRECT_REFUSED` (at the end of `DownloadError`) and
+  `fetchStream(url, onData, username, password, options)`.
+  - The guard is opt-in, and active only with credentials. OPDS sends credentials and
+    its downloads may redirect, so a default-on guard would break it.
+  - A same-origin redirect is followed with credentials, as before.
+- `#if` branches:
+  - `FREEINK_NET_WOLFSSL` (`runGetWolf`, compiled by every env): the header is added on
+    every hop; the guard runs after `resolveUrl`, before the next hop's client is built,
+    and logs only the status and the target host.
+  - `!FREEINK_NET_WOLFSSL` (`runGet`, not compiled): `esp_http_client_set_header`, and
+    with the guard on plus credentials, every redirect is refused (fail closed). Checked
+    by reading only.
+- Call sites unchanged and compiled:
+  - OTA: `OtaUpdater.cpp:43`, `:162`;
+  - OPDS: `OpdsBookBrowserActivity.cpp:364`, `:495`;
+  - fonts: `FontDownloadActivity.cpp:129`, `:451`.
+  KOReader does not use `HttpDownloader`. Nothing switches on `DownloadError`.
+- Build net green. No `guideline` decisions.
