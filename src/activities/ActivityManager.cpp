@@ -19,6 +19,7 @@
 #include "home/HomeActivity.h"
 #include "home/RecentBooksActivity.h"
 #include "network/CrossPointWebServerActivity.h"
+#include "network/GitSyncActivity.h"
 #include "network/UsbDriveActivity.h"
 #include "reader/ReaderActivity.h"
 #include "settings/OpdsServerListActivity.h"
@@ -240,6 +241,15 @@ void ActivityManager::goToUsbDrive() {
 #else
   LOG_ERR("ACT", "USB Drive requested in a build without USB Drive capability");
 #endif
+}
+
+void ActivityManager::goToGitSync() {
+  auto activity = makeUniqueNoThrow<GitSyncActivity>(renderer, mappedInput);
+  if (!activity) {
+    LOG_ERR("ACT", "OOM: Git sync activity");
+    return;
+  }
+  replaceActivity(std::move(activity));
 }
 
 void ActivityManager::goToSettings() { replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput)); }
