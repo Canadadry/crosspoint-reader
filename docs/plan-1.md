@@ -408,4 +408,18 @@ The goals behind every rule below:
 
 ## 6. Step notes
 
-(empty — plan-pilot appends a note after each step)
+### Step 0 — done (2026-10-11, owner, curl from macOS, fine-grained token with Basic auth `x:<token>`)
+
+- Repository: `Canadadry/books`, branch `main`.
+- `GET /repos/Canadadry/books/git/trees/main?recursive=1` returns **200** with no redirect.
+  The response carries the tree `sha` at the top level, then `tree[]` entries with `path`,
+  `mode`, `type` (`tree` or `blob`), `sha`, `size` (blobs only) and `url`.
+- `GET /repos/Canadadry/books/git/blobs/cc858913c6f1452c9cbd67097e1d97d4a4450a08` with
+  `Accept: application/vnd.github.raw+json` returns **200** with no redirect, and 133,386
+  bytes, equal to the tree's `size`. The body is the raw file, not JSON or base64, and
+  `git hash-object` on it gives back `cc858913…`, so the step 1 blob hash and the
+  per-download verification hold.
+- Section 5's fallback is not needed: the blob endpoint is confirmed for this private
+  repository.
+- The repository has a `.atelier/` working directory of Markdown files, which the dot
+  filter excludes as intended.
