@@ -4,6 +4,7 @@
   - [x] Step 1.1 — Git blob hash
     - [x] Blob hasher and hex helpers
   - [ ] Step 1.2 — Path filter
+    - [x] Path filter with verdicts
   - [ ] Step 1.3 — Trees response parser
   - [ ] Step 1.4 — Manifest and tree record format
   - [ ] Step 1.5 — Sync planner
