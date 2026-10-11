@@ -22,15 +22,50 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 
+namespace {
+
+const char* menuItemLabel(HomeMenuItem item) {
+  switch (item) {
+    case HomeMenuItem::FILE_BROWSER:
+      return tr(STR_BROWSE_FILES);
+    case HomeMenuItem::RECENTS:
+      return tr(STR_MENU_RECENT_BOOKS);
+    case HomeMenuItem::OPDS_BROWSER:
+      return tr(STR_OPDS_BROWSER);
+    case HomeMenuItem::FILE_TRANSFER:
+      return tr(STR_FILE_TRANSFER);
+    case HomeMenuItem::SETTINGS_MENU:
+      return tr(STR_SETTINGS_TITLE);
+    case HomeMenuItem::GIT_SYNC:
+    case HomeMenuItem::NONE:
+      break;
+  }
+  return "";
+}
+
+UIIcon menuItemIcon(HomeMenuItem item) {
+  switch (item) {
+    case HomeMenuItem::FILE_BROWSER:
+      return Folder;
+    case HomeMenuItem::RECENTS:
+      return Recent;
+    case HomeMenuItem::OPDS_BROWSER:
+      return Library;
+    case HomeMenuItem::FILE_TRANSFER:
+      return Transfer;
+    case HomeMenuItem::SETTINGS_MENU:
+      return Settings;
+    case HomeMenuItem::GIT_SYNC:
+    case HomeMenuItem::NONE:
+      break;
+  }
+  return None;
+}
+
+}  // namespace
+
 int HomeActivity::getMenuItemCount() const {
-  int count = 4;  // File Browser, Recents, File transfer, Settings
-  if (!recentBooks.empty()) {
-    count += recentBooks.size();
-  }
-  if (hasOpdsServers) {
-    count++;
-  }
-  return count;
+  return static_cast<int>(recentBooks.size()) + home_menu::itemCount(menuOptions);
 }
 
 void HomeActivity::loadRecentBooks(int maxBooks) {
@@ -113,13 +148,15 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
 void HomeActivity::onEnter() {
   Activity::onEnter();
 
-  hasOpdsServers = OPDS_STORE.hasServers();
+  menuOptions.opds = OPDS_STORE.hasServers();
+  menuOptions.gitSync = false;
 
   const auto& metrics = UITheme::getInstance().getMetrics();
   loadRecentBooks(metrics.homeRecentBooksCount);
 
   const auto base = static_cast<int>(recentBooks.size());
-  selectorIndex = initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, hasOpdsServers);
+  selectorIndex =
+      initialMenuItem == HomeMenuItem::NONE ? 0 : base + home_menu::menuItemToIndex(initialMenuItem, menuOptions);
 
   // Trigger first update
   requestUpdate();
@@ -178,7 +215,7 @@ void HomeActivity::loop() {
       return;
     }
     const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
-    switch (indexToMenuItem(menuIndex, hasOpdsServers)) {
+    switch (home_menu::indexToMenuItem(menuIndex, menuOptions)) {
       case HomeMenuItem::FILE_BROWSER:
         onFileBrowserOpen();
         break;
@@ -194,7 +231,8 @@ void HomeActivity::loop() {
       case HomeMenuItem::SETTINGS_MENU:
         onSettingsOpen();
         break;
-      default:
+      case HomeMenuItem::GIT_SYNC:
+      case HomeMenuItem::NONE:
         break;
     }
   };
@@ -306,20 +344,21 @@ void HomeActivity::render(RenderLock&&) {
                           recentBooks, selectorIndex, coverRendered, coverBufferStored, bufferRestored,
                           std::bind(&HomeActivity::storeCoverBuffer, this));
 
-  // Build menu items dynamically
-  std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_MENU_RECENT_BOOKS), tr(STR_FILE_TRANSFER),
-                                        tr(STR_SETTINGS_TITLE)};
-  std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Settings};
-
-  if (hasOpdsServers) {
-    menuItems.insert(menuItems.begin() + 2, tr(STR_OPDS_BROWSER));
-    menuIcons.insert(menuIcons.begin() + 2, Library);
-  }
+  const int itemCount = home_menu::itemCount(menuOptions);
+  std::vector<const char*> menuItems;
+  std::vector<UIIcon> menuIcons;
+  menuItems.reserve(itemCount + 1);
+  menuIcons.reserve(itemCount + 1);
 
   if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
-    // Insert Continue Reading at the top if enabled in theme
-    menuItems.insert(menuItems.begin(), tr(STR_CONTINUE_READING));
-    menuIcons.insert(menuIcons.begin(), Book);
+    menuItems.push_back(tr(STR_CONTINUE_READING));
+    menuIcons.push_back(Book);
+  }
+
+  for (int i = 0; i < itemCount; ++i) {
+    const HomeMenuItem item = home_menu::indexToMenuItem(i, menuOptions);
+    menuItems.push_back(menuItemLabel(item));
+    menuIcons.push_back(menuItemIcon(item));
   }
 
   GUI.drawButtonMenu(
