@@ -24,6 +24,7 @@ lib/EpdFont/scripts/output/
 # Claude Code: keep local agent state out (worktrees, scheduled-task
 # locks, settings.local, scout CLEANUP.md).
 .claude/*
+!.claude/settings.json
 /managed_components
 /.dummy
 /CMakeLists.txt
