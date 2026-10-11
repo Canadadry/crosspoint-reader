@@ -1,6 +1,6 @@
 - [x] Phase 0 — De-risk the GitHub API
   - [x] Step 0.0 — Owner check of the API from a PC
-- [ ] Phase 1 — Pure logic in lib/GitSync/, host-tested
+- [x] Phase 1 — Pure logic in lib/GitSync/, host-tested
   - [x] Step 1.1 — Git blob hash
     - [x] Blob hasher and hex helpers
   - [x] Step 1.2 — Path filter
@@ -17,7 +17,7 @@
     - [x] Path folding
     - [x] Planner core
     - [x] Moves and collisions
-  - [ ] Step 1.6 — Sync executor
+  - [x] Step 1.6 — Sync executor
     - [x] Book cache and bookmark paths
     - [x] Storage interface and in-memory storage
     - [x] Executor core

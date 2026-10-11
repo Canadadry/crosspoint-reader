@@ -525,3 +525,35 @@ Done 2026-10-11 by the owner, with curl from macOS and a fine-grained token sent
   caller allocates it with `makeUniqueNoThrow` and frees it after the plan.
 - Tests: `test/git_sync_path_fold/` (11 cases) and `test/git_sync_planner/` (51 cases).
   Build net green. No `guideline` decisions.
+
+### Step 1.6
+
+- `lib/GitSync/SyncExecutor.{h,cpp}`: `prepare()` creates the work dir, removes the temp
+  file, recovers `manifest.new` and compacts a journal or a torn tail; then
+  `apply(planner)`, or `begin`/`execute`/`end` for hand-made ops, and `requestCancel()`.
+  Callbacks (`fetch`, `hashFile`, `clearBookCache`, `bookMoved`, `onProgress`) are
+  function pointers sharing one ctx. Progress reports n/total from the planner's `onTotal`.
+- Commit point: each operation's journal frame is its last write, and every earlier
+  step is idempotent. A rerun after a fault at any mutating call ends with the same files,
+  manifest and hook effects (fault sweep over a mixed plan and over an adopt-only plan).
+- Downloads are hashed while streaming into `download.tmp`, refused past the declared
+  size, and verified before the rename. Size 0 needs no fetch. Overwrite is remove then
+  rename. A failed fetch or verification is a per-file error; failing storage, journal
+  writes or hooks are fatal.
+- Moves rename the book, then its epub/txt/xtc cache dirs and its bookmark, using
+  `lib/BookCachePath` (now shared with the reader, byte-identical) and
+  `formatBookmarkPath` (checked against the linked `BookmarkUtil`). Then comes the
+  `bookMoved` hook. A resume is decided from what is on the card.
+- **Bytes written at the 2,000-file cap**:
+  - adopt-only first sync: 142,019 B (19 + 2,000 frames);
+  - next run: the same 142,019 B, from the one compaction;
+  - the run after that: 0 B.
+  Linear, not quadratic. RAM: `SyncExecutor` 2,392 B (x86-64 host), compaction scratch
+  8 KB transient.
+- For step 2.9's HalStorage adapter: `HalStorage::open` passes SdFat flags through
+  (Append = `O_RDWR|O_APPEND`), but `HalFile::flush()` returns `void`, so flush errors
+  are invisible on the device. Every open allocates a `HalFile::Impl`. The device's
+  `clearBookCache` clears by file extension; the executor clears a destination cache
+  before any migration rename so a migrated epub cache is not wiped.
+- Tests: `test/git_sync_executor/` (78 cases, about 2 s). Build net green. No `guideline`
+  decisions.
