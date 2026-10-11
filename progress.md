@@ -34,7 +34,7 @@
     - [x] Budget constant and pure helpers
     - [x] Tree snapshot writer
     - [x] Sync run
-    - [ ] HalStorage adapter
+    - [x] HalStorage adapter
     - [ ] Sync engine
   - [ ] Step 2.10 — GitSyncActivity
   - [ ] Step 2.11 — Home menu entry
