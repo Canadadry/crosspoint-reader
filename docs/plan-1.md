@@ -664,3 +664,35 @@ Done 2026-10-11 by the owner, with curl from macOS and a fine-grained token sent
   (one HTTP request or one JSON save) can only be measured on the device (step 12).
 - Tests: `git_sync_github_api` (13), `git_sync_tree_snapshot` (13), `git_sync_run` (32),
   plus 7 hash cases. Build net green. No `guideline` decisions.
+
+### Step 2.10
+
+- `src/activities/network/GitSyncActivity.{h,cpp}`, opened by
+  `ActivityManager::goToGitSync()` with `replaceActivity`, so the home activity is freed
+  first. States: ConfigError, WifiSelection, WifiFailed, Starting, Running, Done.
+- `onEnter` loads the config; an invalid one shows a fix-it screen and Wi-Fi never
+  starts. The Wi-Fi flow is the OPDS one, and the run starts from `loop()` on the
+  activity task, as OPDS and OTA do; no new task.
+- The progress callback:
+  - feeds the watchdog;
+  - pumps `mappedInput` (a Back release cancels between files; the home gesture
+    cancels, then goes home);
+  - tracks the lowest free heap;
+  - publishes a fixed snapshot of at most 288 B under `RenderLock`, on a phase change,
+    on the first cancel, or otherwise every 2,000 ms;
+  - allocates nothing.
+- Running screen: the step, files listed while reading the tree, a progress bar, and
+  `n/total : name` (last path segment). Done screen: "Already up to date" or the five
+  counts, plus failed and skipped lines; on error, a `tr()` title and a 2-line detail.
+  Each `GitSyncError` has its own string, and the switches have no `default`, so a new
+  value triggers `-Wswitch`.
+- `preventAutoSleep()` is always true. `onExit` wipes the config and, when Wi-Fi is on,
+  disconnects and restarts silently, as OPDS does.
+- Logs for step 12: heap and largest block before the run, then the lowest free heap and
+  the loop task's stack high-water mark after it.
+- 35 `STR_GIT_SYNC_*` keys in `english.yaml` and `french.yaml`.
+- Orientation review: all geometry comes from `getScreenSafeArea` plus theme metrics.
+  The worst Done screen (10 lines) ends at y = 417 on Lyra landscape, under 480. A
+  cosmetic point is left as is: in landscape the theme centres the progress percentage
+  on the screen, not on the bar.
+- Build net green (RAM 17.1%, flash 82.7%). No device test. No `guideline` decisions.

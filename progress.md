@@ -36,7 +36,7 @@
     - [x] Sync run
     - [x] HalStorage adapter
     - [x] Sync engine
-  - [ ] Step 2.10 — GitSyncActivity
+  - [x] Step 2.10 — GitSyncActivity
     - [x] Activity shell and strings
     - [x] Sync run, progress and summary
   - [ ] Step 2.11 — Home menu entry
