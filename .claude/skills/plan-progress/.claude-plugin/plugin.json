@@ -1,0 +1,6 @@
+{
+  "name": "plan-progress",
+  "version": "0.1.0",
+  "description": "Shows progress.md, plan-pilot's checklist, in a pane and the status line, and installs its git hook",
+  "types": "./types/index.d.ts"
+}
