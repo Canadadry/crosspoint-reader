@@ -163,8 +163,8 @@ The goals behind every rule below:
 
 ## 3. Phases and steps
 
-**Verification commands for this repository.** These replace the `make test` and
-`make e2e` that the skills copied from slipways-love refer to:
+**Verification commands for this repository.** These are also the commands the skills
+in `.claude/skills/` use (`git-commit`, `tdd`, `check-build`):
 
 - **Host unit tests (gtest)**: `cmake -S test -B build/test -G Ninja && cmake --build build/test && ctest --test-dir build/test --output-on-failure -j`.
   A new suite is registered with `add_subdirectory` in `test/CMakeLists.txt`; see
@@ -400,15 +400,12 @@ The goals behind every rule below:
   Before step 8, the owner decides whether to accept this, or whether step 8 must enable
   verification for `api.github.com` (which needs CA support in `freeink::SecureHttpClient`,
   not checked here: `freeink-sdk/` is empty in this checkout).
-- **The copied skills assume another build.** The skills copied from slipways-love
-  (`git-commit`, `fix-bug`, `tdd`, `check-e2e`, `prd-autopilot`) run `make test` and
-  `make e2e`, which do not exist here. Until they are adapted, use the verification
-  commands listed at the top of section 3. There is no e2e replay suite in this
-  repository, so `check-e2e` steps do not apply.
 
 ## 6. Step notes
 
-### Step 0 — done (2026-10-11, owner, curl from macOS, fine-grained token with Basic auth `x:<token>`)
+### Step 0.0
+
+Done 2026-10-11 by the owner, with curl from macOS and a fine-grained token sent as Basic auth `x:<token>`.
 
 - Repository: `Canadadry/books`, branch `main`.
 - `GET /repos/Canadadry/books/git/trees/main?recursive=1` returns **200** with no redirect.
