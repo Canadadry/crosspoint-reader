@@ -14,6 +14,8 @@
 //   'P' entry: sha[20], size u64, replaces u32, path bytes (1..MAX_SYNC_PATH_BYTES, no terminator)
 //   'D' drop:  target u32
 //   'S' seal:  count u32, the number of entry frames before it
+// Tree: entries, then the seal. Manifest: base entries, the seal, then a journal of entries and drops.
+// replaces and drop targets exist only in the journal and name an earlier entry frame.
 // An offset is the position of a frame's first byte in the file.
 constexpr uint8_t RECORD_FILE_VERSION = 1;
 constexpr uint8_t RECORD_FILE_MAGIC[4] = {'G', 'S', 'R', 'F'};
@@ -26,6 +28,8 @@ constexpr size_t ENTRY_FIXED_BODY_SIZE = ENTRY_REPLACES_FIELD + 4;
 constexpr size_t OFFSET_BODY_SIZE = 4;
 constexpr size_t MAX_FRAME_SIZE = FRAME_HEADER_SIZE + ENTRY_FIXED_BODY_SIZE + MAX_SYNC_PATH_BYTES;
 constexpr uint32_t NO_OFFSET = 0xFFFFFFFFu;
+// Header plus a seal: the shortest valid manifest, so the smallest offset a journal resumes at.
+constexpr size_t EMPTY_MANIFEST_SIZE = RECORD_HEADER_SIZE + FRAME_HEADER_SIZE + OFFSET_BODY_SIZE;
 
 enum class RecordFileKind : uint8_t { Tree = 1, Manifest = 2 };
 
@@ -60,6 +64,11 @@ inline uint64_t recordLoadLe(const uint8_t* in, size_t bytes) {
     value |= static_cast<uint64_t>(in[i]) << (8 * i);
   }
   return value;
+}
+
+// A drop or replaces target must be an earlier frame's offset.
+inline bool recordTargetPrecedes(uint32_t target, uint32_t offset) {
+  return target >= RECORD_HEADER_SIZE && target < offset;
 }
 
 // frame holds the frame header followed by bodyLen body bytes; the CRC field itself is skipped.

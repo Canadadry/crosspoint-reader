@@ -68,44 +68,99 @@ RecordStatus RecordReader::readHeader() {
   return RecordStatus::Record;
 }
 
-// Record for an entry; End after the seal is read or at a clean end of file after it.
+// Record for an entry or a drop; End after a seal, to keep reading, or once finished.
 RecordStatus RecordReader::readFrame(SyncRecord& record) {
   if (stage == Stage::Sealed) {
     const ReadResult result = readExactly(source, frame, 1);
     if (result == ReadResult::Error) return RecordStatus::IoError;
     return finish(result == ReadResult::Empty ? RecordStatus::End : RecordStatus::Corrupt);
   }
+  const bool inJournal = stage == Stage::Journal;
   ReadResult result = readExactly(source, frame, FRAME_HEADER_SIZE);
+  if (inJournal && result == ReadResult::Empty) return finish(RecordStatus::End);
+  // A journal frame cut off by the end of the file is the torn tail of an interrupted append.
+  if (inJournal && result == ReadResult::Short) return endTorn();
   if (result != ReadResult::Full) return incompleteStatus(result);
   const auto frameKind = static_cast<RecordFrameKind>(frame[0]);
   const size_t bodyLen = recordLoadLe(frame + 1, 2);
   if (!bodyLengthFits(frameKind, bodyLen)) return RecordStatus::Corrupt;
   result = readExactly(source, frame + FRAME_HEADER_SIZE, bodyLen);
+  if (inJournal && (result == ReadResult::Short || result == ReadResult::Empty)) return endTorn();
   if (result != ReadResult::Full) return incompleteStatus(result);
-  if (recordLoadLe(frame + 3, 4) != recordFrameCrc(frame, bodyLen)) return RecordStatus::Corrupt;
+  if (recordLoadLe(frame + 3, 4) != recordFrameCrc(frame, bodyLen)) {
+    return inJournal ? tornIfLast() : RecordStatus::Corrupt;
+  }
   const uint8_t* body = frame + FRAME_HEADER_SIZE;
   const uint32_t offset = position;
   position += FRAME_HEADER_SIZE + bodyLen;
 
   if (frameKind == RecordFrameKind::Seal) {
-    if (recordLoadLe(body, OFFSET_BODY_SIZE) != entryCount) return RecordStatus::Corrupt;
-    stage = Stage::Sealed;
+    if (inJournal || recordLoadLe(body, OFFSET_BODY_SIZE) != entryCount) return RecordStatus::Corrupt;
+    stage = kind == RecordFileKind::Manifest ? Stage::Journal : Stage::Sealed;
     return RecordStatus::End;
   }
-  if (frameKind == RecordFrameKind::Drop) return RecordStatus::Corrupt;
+  record.kind = frameKind;
+  record.offset = offset;
+  record.inJournal = inJournal;
+  if (frameKind == RecordFrameKind::Drop) {
+    const auto target = static_cast<uint32_t>(recordLoadLe(body, OFFSET_BODY_SIZE));
+    if (!inJournal || !recordTargetPrecedes(target, offset)) return RecordStatus::Corrupt;
+    record.target = target;
+    record.replaces = NO_OFFSET;
+    record.path = nullptr;
+    record.pathLen = 0;
+    record.size = 0;
+    return RecordStatus::Record;
+  }
 
   const auto replaces = static_cast<uint32_t>(recordLoadLe(body + ENTRY_REPLACES_FIELD, 4));
-  if (replaces != NO_OFFSET) return RecordStatus::Corrupt;
+  if (replaces != NO_OFFSET && (!inJournal || !recordTargetPrecedes(replaces, offset))) return RecordStatus::Corrupt;
+  decodeEntry(offset, bodyLen, record);
+  record.inJournal = inJournal;
+  if (!inJournal) ++entryCount;
+  return RecordStatus::Record;
+}
+
+RecordStatus RecordReader::readEntryAt(uint32_t offset, SyncRecord& record) {
+  if (offset < RECORD_HEADER_SIZE) return RecordStatus::Corrupt;
+  if (!source.seek(offset)) return RecordStatus::IoError;
+  ReadResult result = readExactly(source, frame, FRAME_HEADER_SIZE);
+  if (result != ReadResult::Full) return incompleteStatus(result);
+  const size_t bodyLen = recordLoadLe(frame + 1, 2);
+  if (static_cast<RecordFrameKind>(frame[0]) != RecordFrameKind::Entry ||
+      !bodyLengthFits(RecordFrameKind::Entry, bodyLen)) {
+    return RecordStatus::Corrupt;
+  }
+  result = readExactly(source, frame + FRAME_HEADER_SIZE, bodyLen);
+  if (result != ReadResult::Full) return incompleteStatus(result);
+  if (recordLoadLe(frame + 3, 4) != recordFrameCrc(frame, bodyLen)) return RecordStatus::Corrupt;
+  decodeEntry(offset, bodyLen, record);
+  if (record.replaces != NO_OFFSET && !recordTargetPrecedes(record.replaces, offset)) return RecordStatus::Corrupt;
+  record.inJournal = false;
+  return RecordStatus::Record;
+}
+
+void RecordReader::decodeEntry(uint32_t offset, size_t bodyLen, SyncRecord& record) {
+  const uint8_t* body = frame + FRAME_HEADER_SIZE;
   record.kind = RecordFrameKind::Entry;
   record.offset = offset;
-  record.inJournal = false;
   memcpy(record.sha, body, GitBlobHasher::SHA_SIZE);
   record.size = recordLoadLe(body + ENTRY_SIZE_FIELD, 8);
-  record.replaces = replaces;
+  record.replaces = static_cast<uint32_t>(recordLoadLe(body + ENTRY_REPLACES_FIELD, 4));
   record.pathLen = bodyLen - ENTRY_FIXED_BODY_SIZE;
   frame[FRAME_HEADER_SIZE + bodyLen] = '\0';
   record.path = reinterpret_cast<const char*>(body + ENTRY_FIXED_BODY_SIZE);
   record.target = NO_OFFSET;
-  ++entryCount;
-  return RecordStatus::Record;
+}
+
+RecordStatus RecordReader::endTorn() {
+  torn = true;
+  return finish(RecordStatus::End);
+}
+
+// A journal frame failing its CRC is the torn tail only when nothing follows it.
+RecordStatus RecordReader::tornIfLast() {
+  const ReadResult result = readExactly(source, frame, 1);
+  if (result == ReadResult::Error) return RecordStatus::IoError;
+  return result == ReadResult::Empty ? endTorn() : RecordStatus::Corrupt;
 }

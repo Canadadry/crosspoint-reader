@@ -570,3 +570,577 @@ TEST(MemoryRecordStreamTest, ReadsFollowTheirOwnCursorWithinLength) {
   EXPECT_EQ(stream.read(out, 1), 1);
   EXPECT_EQ(out[0], 11);
 }
+
+namespace {
+
+struct ReadRecord {
+  RecordFrameKind kind;
+  uint32_t offset;
+  bool inJournal;
+  std::string path;
+  uint64_t size;
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  uint32_t replaces;
+  uint32_t target;
+};
+
+struct ManifestRead {
+  RecordStatus status;
+  std::vector<ReadRecord> records;
+  bool tornTail;
+  uint32_t endOffset;
+};
+
+ManifestRead readManifest(RecordSource& source) {
+  RecordReader reader(source, RecordFileKind::Manifest);
+  ManifestRead result{};
+  SyncRecord record;
+  while ((result.status = reader.next(record)) == RecordStatus::Record) {
+    ReadRecord copy{record.kind, record.offset, record.inJournal, {}, 0, {}, NO_OFFSET, NO_OFFSET};
+    if (record.kind == RecordFrameKind::Entry) {
+      copy.path.assign(record.path, record.pathLen);
+      EXPECT_EQ(strlen(record.path), record.pathLen);
+      copy.size = record.size;
+      memcpy(copy.sha, record.sha, sizeof(copy.sha));
+      copy.replaces = record.replaces;
+    } else {
+      copy.target = record.target;
+    }
+    result.records.push_back(copy);
+  }
+  result.tornTail = reader.tornTail();
+  result.endOffset = reader.endOffset();
+  return result;
+}
+
+ManifestRead readManifest(std::vector<uint8_t>& bytes, size_t length = SIZE_MAX) {
+  MemoryRecordStream stream(bytes.data(), bytes.size(), length);
+  return readManifest(stream);
+}
+
+// A base of three entries, then a journal with an add, a modify, a move, a drop of a base entry
+// and a drop of a journal entry.
+struct WrittenManifest {
+  std::vector<uint8_t> bytes;
+  std::vector<ReadRecord> records;
+  uint32_t sealEnd;
+};
+
+WrittenManifest writeManifest() {
+  WrittenManifest manifest;
+  manifest.bytes.resize(FILE_CAPACITY);
+  MemoryRecordStream stream(manifest.bytes.data(), manifest.bytes.size());
+  RecordWriter writer(stream);
+  EXPECT_TRUE(writer.begin(RecordFileKind::Manifest));
+  auto put = [&](const std::string& path, uint64_t size, uint8_t seed, uint32_t replaces, bool inJournal) {
+    ReadRecord record{RecordFrameKind::Entry, 0, inJournal, path, size, {}, replaces, NO_OFFSET};
+    fillSha(record.sha, seed);
+    EXPECT_TRUE(writer.put(record.sha, size, path.data(), path.size(), replaces, &record.offset));
+    manifest.records.push_back(record);
+    return record.offset;
+  };
+  auto drop = [&](uint32_t target) {
+    ReadRecord record{
+        RecordFrameKind::Drop, static_cast<uint32_t>(stream.length()), true, {}, 0, {}, NO_OFFSET, target};
+    EXPECT_TRUE(writer.drop(target));
+    manifest.records.push_back(record);
+  };
+  const uint32_t a = put("a.epub", 10, 1, NO_OFFSET, false);
+  const uint32_t b = put("Livres/\xC3\x89t\xC3\xA9.epub", 20, 2, NO_OFFSET, false);
+  const uint32_t c = put("c.epub", 30, 3, NO_OFFSET, false);
+  EXPECT_TRUE(writer.seal());
+  manifest.sealEnd = static_cast<uint32_t>(stream.length());
+  const uint32_t added = put("new.epub", 40, 4, NO_OFFSET, true);
+  put("a.epub", 11, 5, a, true);
+  put("moved/b.epub", 20, 2, b, true);
+  drop(c);
+  drop(added);
+  manifest.bytes.resize(stream.length());
+  return manifest;
+}
+
+void expectSameRecords(const std::vector<ReadRecord>& actual, const std::vector<ReadRecord>& expected, size_t count) {
+  ASSERT_EQ(actual.size(), count);
+  for (size_t i = 0; i < count; ++i) {
+    SCOPED_TRACE(i);
+    EXPECT_EQ(actual[i].kind, expected[i].kind);
+    EXPECT_EQ(actual[i].offset, expected[i].offset);
+    EXPECT_EQ(actual[i].inJournal, expected[i].inJournal);
+    EXPECT_EQ(actual[i].path, expected[i].path);
+    EXPECT_EQ(actual[i].size, expected[i].size);
+    EXPECT_EQ(memcmp(actual[i].sha, expected[i].sha, GitBlobHasher::SHA_SIZE), 0);
+    EXPECT_EQ(actual[i].replaces, expected[i].replaces);
+    EXPECT_EQ(actual[i].target, expected[i].target);
+  }
+}
+
+}  // namespace
+
+TEST(ManifestFileTest, BaseAndJournalRoundTrip) {
+  WrittenManifest manifest = writeManifest();
+  const ManifestRead read = readManifest(manifest.bytes);
+  EXPECT_EQ(read.status, RecordStatus::End);
+  expectSameRecords(read.records, manifest.records, manifest.records.size());
+  EXPECT_FALSE(read.tornTail);
+  EXPECT_EQ(read.endOffset, manifest.bytes.size());
+}
+
+namespace {
+
+// A hand-built manifest with one base entry at offset 8; journal frames follow its seal.
+std::vector<uint8_t> handBuiltBase() {
+  std::vector<uint8_t> bytes = fileHeader(RecordFileKind::Manifest);
+  appendFrame(bytes, 'P', entryBody("a.epub"));
+  appendFrame(bytes, 'S', u32Body(1));
+  return bytes;
+}
+
+}  // namespace
+
+TEST(ManifestFileTest, HandBuiltJournalTargetingEarlierFramesReadsEnd) {
+  std::vector<uint8_t> bytes = handBuiltBase();
+  const uint32_t journalEntry = static_cast<uint32_t>(bytes.size());
+  appendFrame(bytes, 'P', entryBody("b.epub", RECORD_HEADER_SIZE));
+  appendFrame(bytes, 'D', u32Body(journalEntry));
+  EXPECT_EQ(readManifest(bytes).status, RecordStatus::End);
+}
+
+TEST(ManifestFileTest, JournalTargetNotBelowItsOwnOffsetOrBelowHeaderIsCorrupt) {
+  for (uint32_t target : {0u, 7u}) {
+    std::vector<uint8_t> drop = handBuiltBase();
+    appendFrame(drop, 'D', u32Body(target));
+    EXPECT_EQ(readManifest(drop).status, RecordStatus::Corrupt) << target;
+    std::vector<uint8_t> replace = handBuiltBase();
+    appendFrame(replace, 'P', entryBody("b.epub", target));
+    EXPECT_EQ(readManifest(replace).status, RecordStatus::Corrupt) << target;
+  }
+  for (uint32_t delta : {0u, 1u, 1000u}) {
+    std::vector<uint8_t> drop = handBuiltBase();
+    appendFrame(drop, 'D', u32Body(static_cast<uint32_t>(drop.size()) + delta));
+    EXPECT_EQ(readManifest(drop).status, RecordStatus::Corrupt) << delta;
+    std::vector<uint8_t> replace = handBuiltBase();
+    appendFrame(replace, 'P', entryBody("b.epub", static_cast<uint32_t>(replace.size()) + delta));
+    EXPECT_EQ(readManifest(replace).status, RecordStatus::Corrupt) << delta;
+  }
+}
+
+TEST(ManifestFileTest, SealInJournalIsCorrupt) {
+  std::vector<uint8_t> bytes = handBuiltBase();
+  appendFrame(bytes, 'S', u32Body(1));
+  EXPECT_EQ(readManifest(bytes).status, RecordStatus::Corrupt);
+}
+
+TEST(ManifestFileTest, DropOrReplacesInBaseIsCorrupt) {
+  std::vector<uint8_t> drop = fileHeader(RecordFileKind::Manifest);
+  appendFrame(drop, 'P', entryBody("a.epub"));
+  appendFrame(drop, 'D', u32Body(RECORD_HEADER_SIZE));
+  appendFrame(drop, 'S', u32Body(1));
+  EXPECT_EQ(readManifest(drop).status, RecordStatus::Corrupt);
+
+  std::vector<uint8_t> replace = fileHeader(RecordFileKind::Manifest);
+  appendFrame(replace, 'P', entryBody("a.epub"));
+  appendFrame(replace, 'P', entryBody("b.epub", RECORD_HEADER_SIZE));
+  appendFrame(replace, 'S', u32Body(2));
+  EXPECT_EQ(readManifest(replace).status, RecordStatus::Corrupt);
+}
+
+TEST(ManifestFileTest, BaseSealCountMismatchIsCorrupt) {
+  std::vector<uint8_t> bytes = fileHeader(RecordFileKind::Manifest);
+  appendFrame(bytes, 'P', entryBody("a.epub"));
+  appendFrame(bytes, 'S', u32Body(2));
+  EXPECT_EQ(readManifest(bytes).status, RecordStatus::Corrupt);
+}
+
+TEST(ManifestFileTest, CutAtEveryByteOffsetKeepsExactlyTheCompleteJournalFrames) {
+  WrittenManifest manifest = writeManifest();
+  size_t baseCount = 0;
+  while (!manifest.records[baseCount].inJournal) ++baseCount;
+  for (size_t k = 0; k < manifest.bytes.size(); ++k) {
+    SCOPED_TRACE(k);
+    const ManifestRead read = readManifest(manifest.bytes, k);
+    if (k < manifest.sealEnd) {
+      EXPECT_EQ(read.status, RecordStatus::Truncated);
+      continue;
+    }
+    ASSERT_EQ(read.status, RecordStatus::End);
+    size_t complete = baseCount;
+    uint32_t validEnd = manifest.sealEnd;
+    while (complete < manifest.records.size()) {
+      const uint32_t frameEnd = complete + 1 < manifest.records.size() ? manifest.records[complete + 1].offset
+                                                                       : static_cast<uint32_t>(manifest.bytes.size());
+      if (frameEnd > k) break;
+      validEnd = frameEnd;
+      ++complete;
+    }
+    expectSameRecords(read.records, manifest.records, complete);
+    EXPECT_EQ(read.tornTail, validEnd != k);
+    EXPECT_EQ(read.endOffset, validEnd);
+  }
+}
+
+namespace {
+
+// The frame holding byte i, and whether i lies in that frame's CRC or body, which the CRC covers alone.
+struct FramePosition {
+  size_t index;
+  bool crcOrBody;
+};
+
+FramePosition framePosition(const WrittenManifest& manifest, size_t i) {
+  size_t index = 0;
+  while (index + 1 < manifest.records.size() && manifest.records[index + 1].offset <= i) ++index;
+  return {index, i >= manifest.records[index].offset + 3};
+}
+
+}  // namespace
+
+TEST(ManifestFileTest, FlippedBitNeverReadsEndWithAlteredRecords) {
+  const WrittenManifest manifest = writeManifest();
+  const size_t last = manifest.records.size() - 1;
+  for (size_t i = 0; i < manifest.bytes.size(); ++i) {
+    for (int bit = 0; bit < 8; ++bit) {
+      SCOPED_TRACE(testing::Message() << "byte " << i << " bit " << bit);
+      std::vector<uint8_t> bytes = manifest.bytes;
+      bytes[i] ^= static_cast<uint8_t>(1u << bit);
+      const ManifestRead read = readManifest(bytes);
+      if (i < manifest.sealEnd) {
+        EXPECT_NE(read.status, RecordStatus::End);
+        continue;
+      }
+      ASSERT_TRUE(read.status == RecordStatus::End || read.status == RecordStatus::Corrupt);
+      if (read.status == RecordStatus::End) {
+        ASSERT_LT(read.records.size(), manifest.records.size());
+        expectSameRecords(read.records, manifest.records, read.records.size());
+        EXPECT_TRUE(read.tornTail);
+      }
+      const FramePosition at = framePosition(manifest, i);
+      if (!at.crcOrBody) continue;
+      if (at.index == last) {
+        EXPECT_EQ(read.status, RecordStatus::End);
+        expectSameRecords(read.records, manifest.records, last);
+        EXPECT_EQ(read.endOffset, manifest.records[last].offset);
+      } else {
+        EXPECT_EQ(read.status, RecordStatus::Corrupt);
+      }
+    }
+  }
+}
+
+TEST(ManifestFileTest, FlippedBitInBaseFrameIsCorrupt) {
+  const WrittenManifest manifest = writeManifest();
+  for (size_t i = RECORD_HEADER_SIZE; i < manifest.sealEnd; ++i) {
+    std::vector<uint8_t> bytes = manifest.bytes;
+    bytes[i] ^= 0x01;
+    EXPECT_EQ(readManifest(bytes).status, RecordStatus::Corrupt) << i;
+  }
+}
+
+TEST(ManifestFileTest, AppendToResumesTheJournalAtTheReadEndOffset) {
+  uint8_t file[FILE_CAPACITY];
+  MemoryRecordStream stream(file, sizeof(file));
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  fillSha(sha, 9);
+  uint32_t base = 0;
+  {
+    RecordWriter writer(stream);
+    ASSERT_TRUE(writer.begin(RecordFileKind::Manifest));
+    ASSERT_TRUE(writer.put(sha, 5, "a.epub", 6, NO_OFFSET, &base));
+    ASSERT_TRUE(writer.seal());
+  }
+  const ManifestRead before = readManifest(stream);
+  ASSERT_EQ(before.status, RecordStatus::End);
+  ASSERT_EQ(before.endOffset, stream.length());
+
+  RecordWriter writer(stream);
+  ASSERT_TRUE(writer.appendTo(before.endOffset));
+  uint32_t moved = 0;
+  ASSERT_TRUE(writer.put(sha, 5, "b.epub", 6, base, &moved));
+  EXPECT_EQ(moved, before.endOffset);
+  ASSERT_TRUE(writer.drop(moved));
+
+  ASSERT_TRUE(stream.seek(0));
+  const ManifestRead after = readManifest(stream);
+  EXPECT_EQ(after.status, RecordStatus::End);
+  ASSERT_EQ(after.records.size(), 3u);
+  EXPECT_EQ(after.records[1].offset, moved);
+  EXPECT_EQ(after.records[1].replaces, base);
+  EXPECT_EQ(after.records[1].path, "b.epub");
+  EXPECT_EQ(after.records[2].target, moved);
+  EXPECT_TRUE(after.records[2].inJournal);
+}
+
+TEST(RecordWriterTest, RefusesOutOfGrammarManifestFramesAndWritesNothing) {
+  uint8_t file[FILE_CAPACITY];
+  MemoryRecordStream stream(file, sizeof(file));
+  RecordWriter writer(stream);
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  fillSha(sha, 3);
+  EXPECT_FALSE(writer.drop(RECORD_HEADER_SIZE));
+  ASSERT_TRUE(writer.begin(RecordFileKind::Manifest));
+  EXPECT_FALSE(writer.appendTo(RECORD_HEADER_SIZE));
+  uint32_t base = 0;
+  ASSERT_TRUE(writer.put(sha, 1, "a", 1, NO_OFFSET, &base));
+  size_t length = stream.length();
+  EXPECT_FALSE(writer.put(sha, 1, "b", 1, base, nullptr));
+  EXPECT_FALSE(writer.drop(base));
+  EXPECT_EQ(stream.length(), length);
+
+  ASSERT_TRUE(writer.seal());
+  length = stream.length();
+  const auto position = static_cast<uint32_t>(length);
+  EXPECT_FALSE(writer.seal());
+  for (uint32_t target : {0u, 7u, position, position + 1, NO_OFFSET - 1}) {
+    EXPECT_FALSE(writer.drop(target)) << target;
+    EXPECT_FALSE(writer.put(sha, 1, "b", 1, target, nullptr)) << target;
+  }
+  EXPECT_EQ(stream.length(), length);
+  EXPECT_FALSE(writer.failed());
+
+  ASSERT_TRUE(writer.drop(base));
+  EXPECT_EQ(readManifest(stream).status, RecordStatus::End);
+}
+
+TEST(RecordWriterTest, DropInTreeIsRefused) {
+  uint8_t file[FILE_CAPACITY];
+  MemoryRecordStream stream(file, sizeof(file));
+  RecordWriter writer(stream);
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  fillSha(sha, 3);
+  ASSERT_TRUE(writer.begin(RecordFileKind::Tree));
+  uint32_t entry = 0;
+  ASSERT_TRUE(writer.put(sha, 1, "a", 1, NO_OFFSET, &entry));
+  EXPECT_FALSE(writer.drop(entry));
+  ASSERT_TRUE(writer.seal());
+  EXPECT_FALSE(writer.drop(entry));
+  EXPECT_FALSE(writer.put(sha, 1, "b", 1, entry, nullptr));
+}
+
+TEST(RecordWriterTest, AppendToRefusesAnOffsetBeforeAnEmptyManifestsEnd) {
+  uint8_t file[FILE_CAPACITY];
+  MemoryRecordStream stream(file, sizeof(file));
+  const auto emptyManifest = static_cast<uint32_t>(RECORD_HEADER_SIZE + FRAME_HEADER_SIZE + OFFSET_BODY_SIZE);
+  for (uint32_t endOffset : {0u, 8u, emptyManifest - 1}) {
+    RecordWriter writer(stream);
+    EXPECT_FALSE(writer.appendTo(endOffset)) << endOffset;
+  }
+  RecordWriter writer(stream);
+  EXPECT_TRUE(writer.appendTo(emptyManifest));
+  EXPECT_FALSE(writer.appendTo(emptyManifest));
+  EXPECT_FALSE(writer.begin(RecordFileKind::Manifest));
+  EXPECT_FALSE(writer.seal());
+  EXPECT_EQ(stream.length(), 0u);
+}
+
+TEST(RecordWriterTest, FailedSinkWriteLeavesATruncatedBaseOrATornJournal) {
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  fillSha(sha, 4);
+  constexpr size_t BASE_WRITES = 3;  // header, one entry, seal
+  constexpr size_t TOTAL_WRITES = BASE_WRITES + 3;
+  for (size_t failOn = 1; failOn <= TOTAL_WRITES; ++failOn) {
+    SCOPED_TRACE(failOn);
+    FailingSink sink(failOn);
+    RecordWriter writer(sink);
+    uint32_t base = RECORD_HEADER_SIZE;
+    uint32_t added = 0;
+    size_t succeeded = writer.begin(RecordFileKind::Manifest) ? 1 : 0;
+    if (writer.put(sha, 1, "a.epub", 6, NO_OFFSET, &base)) ++succeeded;
+    if (writer.seal()) ++succeeded;
+    if (writer.put(sha, 2, "b.epub", 6, NO_OFFSET, &added)) ++succeeded;
+    if (writer.put(sha, 3, "c.epub", 6, base, nullptr)) ++succeeded;
+    if (writer.drop(added == 0 ? base : added)) ++succeeded;
+    EXPECT_EQ(succeeded, failOn - 1);
+    EXPECT_TRUE(writer.failed());
+
+    const ManifestRead read = readManifest(sink.bytes);
+    if (failOn <= BASE_WRITES) {
+      EXPECT_EQ(read.status, RecordStatus::Truncated);
+    } else {
+      EXPECT_EQ(read.status, RecordStatus::End);
+      EXPECT_TRUE(read.tornTail);
+      EXPECT_EQ(read.records.size(), failOn - 3);
+    }
+  }
+}
+
+namespace {
+
+// Reads each listed entry back by offset with one reader, in the order given.
+void expectEntriesReadBack(std::vector<uint8_t>& bytes, RecordFileKind kind, const std::vector<ReadRecord>& expected,
+                           const std::vector<size_t>& order) {
+  MemoryRecordStream stream(bytes.data(), bytes.size(), bytes.size());
+  RecordReader reader(stream, kind);
+  for (size_t i : order) {
+    SCOPED_TRACE(i);
+    SyncRecord record;
+    ASSERT_EQ(reader.readEntryAt(expected[i].offset, record), RecordStatus::Record);
+    EXPECT_EQ(record.kind, RecordFrameKind::Entry);
+    EXPECT_EQ(record.offset, expected[i].offset);
+    EXPECT_EQ(std::string(record.path), expected[i].path);
+    EXPECT_EQ(record.pathLen, expected[i].path.size());
+    EXPECT_EQ(record.size, expected[i].size);
+    EXPECT_EQ(memcmp(record.sha, expected[i].sha, GitBlobHasher::SHA_SIZE), 0);
+    EXPECT_EQ(record.replaces, expected[i].replaces);
+  }
+}
+
+// Forward, reverse and a fixed shuffle of 0..count-1.
+std::vector<std::vector<size_t>> readBackOrders(size_t count) {
+  std::vector<size_t> forward;
+  for (size_t i = 0; i < count; ++i) forward.push_back(i);
+  std::vector<size_t> reverse(forward.rbegin(), forward.rend());
+  std::vector<size_t> shuffled = forward;
+  uint32_t seed = 12345;
+  for (size_t i = shuffled.size(); i > 1; --i) {
+    seed = seed * 1103515245u + 12345u;
+    std::swap(shuffled[i - 1], shuffled[(seed >> 8) % i]);
+  }
+  return {forward, reverse, shuffled};
+}
+
+}  // namespace
+
+TEST(ReadEntryAtTest, ReadsBackEveryTreeEntryInAnyOrder) {
+  const std::vector<TestEntry> entries = sampleEntries();
+  WrittenTree tree = writeTree(entries);
+  std::vector<ReadRecord> expected;
+  for (size_t i = 0; i < entries.size(); ++i) {
+    ReadRecord record{
+        RecordFrameKind::Entry, tree.offsets[i], false, entries[i].path, entries[i].size, {}, NO_OFFSET, NO_OFFSET};
+    memcpy(record.sha, entries[i].sha, sizeof(record.sha));
+    expected.push_back(record);
+  }
+  for (const std::vector<size_t>& order : readBackOrders(expected.size())) {
+    expectEntriesReadBack(tree.bytes, RecordFileKind::Tree, expected, order);
+  }
+}
+
+TEST(ReadEntryAtTest, ReadsBackEveryManifestEntryInBaseAndJournal) {
+  WrittenManifest manifest = writeManifest();
+  std::vector<ReadRecord> entries;
+  for (const ReadRecord& record : manifest.records) {
+    if (record.kind == RecordFrameKind::Entry) entries.push_back(record);
+  }
+  for (const std::vector<size_t>& order : readBackOrders(entries.size())) {
+    expectEntriesReadBack(manifest.bytes, RecordFileKind::Manifest, entries, order);
+  }
+}
+
+namespace {
+
+RecordStatus readEntryAt(std::vector<uint8_t>& bytes, uint32_t offset, size_t length = SIZE_MAX) {
+  MemoryRecordStream stream(bytes.data(), bytes.size(), length);
+  RecordReader reader(stream, RecordFileKind::Manifest);
+  SyncRecord record;
+  return reader.readEntryAt(offset, record);
+}
+
+}  // namespace
+
+TEST(ReadEntryAtTest, OffsetThatIsNotAnEntryFrameIsRefused) {
+  WrittenManifest manifest = writeManifest();
+  EXPECT_EQ(readEntryAt(manifest.bytes, 0), RecordStatus::Corrupt);
+  EXPECT_EQ(readEntryAt(manifest.bytes, RECORD_HEADER_SIZE - 1), RecordStatus::Corrupt);
+  const uint32_t seal = manifest.sealEnd - FRAME_HEADER_SIZE - OFFSET_BODY_SIZE;
+  EXPECT_EQ(readEntryAt(manifest.bytes, seal), RecordStatus::Corrupt);
+  for (const ReadRecord& record : manifest.records) {
+    SCOPED_TRACE(record.offset);
+    if (record.kind == RecordFrameKind::Drop) {
+      EXPECT_EQ(readEntryAt(manifest.bytes, record.offset), RecordStatus::Corrupt);
+    } else {
+      for (uint32_t inside = 1; inside < FRAME_HEADER_SIZE + ENTRY_FIXED_BODY_SIZE; ++inside) {
+        EXPECT_NE(readEntryAt(manifest.bytes, record.offset + inside), RecordStatus::Record) << inside;
+      }
+    }
+  }
+}
+
+TEST(ReadEntryAtTest, DamagedOrCutEntryFrameIsRefused) {
+  const WrittenManifest manifest = writeManifest();
+  for (const ReadRecord& record : manifest.records) {
+    if (record.kind != RecordFrameKind::Entry) continue;
+    SCOPED_TRACE(record.offset);
+    const size_t frameEnd = record.offset + FRAME_HEADER_SIZE + ENTRY_FIXED_BODY_SIZE + record.path.size();
+    for (size_t i = record.offset + 3; i < frameEnd; ++i) {
+      std::vector<uint8_t> bytes = manifest.bytes;
+      bytes[i] ^= 0x40;
+      EXPECT_EQ(readEntryAt(bytes, record.offset), RecordStatus::Corrupt) << i;
+    }
+    for (size_t k = record.offset; k < frameEnd; ++k) {
+      std::vector<uint8_t> bytes = manifest.bytes;
+      EXPECT_EQ(readEntryAt(bytes, record.offset, k), RecordStatus::Truncated) << k;
+    }
+  }
+}
+
+TEST(ReadEntryAtTest, ReplacesNotBelowTheFrameIsCorrupt) {
+  std::vector<uint8_t> bytes = handBuiltBase();
+  const auto offset = static_cast<uint32_t>(bytes.size());
+  appendFrame(bytes, 'P', entryBody("b.epub", offset));
+  EXPECT_EQ(readEntryAt(bytes, offset), RecordStatus::Corrupt);
+}
+
+TEST(ReadEntryAtTest, RefusedSeekOrReadIsIoError) {
+  WrittenManifest manifest = writeManifest();
+  EXPECT_EQ(readEntryAt(manifest.bytes, static_cast<uint32_t>(manifest.bytes.size()) + 1), RecordStatus::IoError);
+  for (const ReadRecord& record : manifest.records) {
+    if (record.kind != RecordFrameKind::Entry) continue;
+    FailingSource source(manifest.bytes.data(), manifest.bytes.size(), 3);
+    RecordReader reader(source, RecordFileKind::Manifest);
+    SyncRecord read;
+    EXPECT_EQ(reader.readEntryAt(record.offset, read), RecordStatus::IoError) << record.offset;
+  }
+}
+
+TEST(ManifestFileTest, EachJournalOperationAppendsOnlyItsOwnFrame) {
+  constexpr size_t COUNT = 200;
+  std::vector<uint8_t> bytes(65536);
+  MemoryRecordStream stream(bytes.data(), bytes.size());
+  RecordWriter writer(stream);
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  fillSha(sha, 6);
+  std::vector<uint32_t> offsets;
+  offsets.reserve(COUNT);
+  ASSERT_TRUE(writer.begin(RecordFileKind::Manifest));
+  for (size_t i = 0; i < COUNT; ++i) {
+    const std::string path = "books/" + std::to_string(i) + ".epub";
+    uint32_t offset = 0;
+    ASSERT_TRUE(writer.put(sha, i, path.data(), path.size(), NO_OFFSET, &offset));
+    offsets.push_back(offset);
+  }
+  ASSERT_TRUE(writer.seal());
+
+  size_t expected = stream.length();
+  for (size_t i = 0; i < COUNT; ++i) {
+    if (i % 2 == 0) {
+      const std::string path = "moved/" + std::to_string(i) + ".epub";
+      ASSERT_TRUE(writer.put(sha, i, path.data(), path.size(), offsets[i], nullptr));
+      expected += FRAME_HEADER_SIZE + ENTRY_FIXED_BODY_SIZE + path.size();
+    } else {
+      ASSERT_TRUE(writer.drop(offsets[i]));
+      expected += FRAME_HEADER_SIZE + OFFSET_BODY_SIZE;
+    }
+    ASSERT_EQ(stream.length(), expected) << i;
+  }
+  EXPECT_EQ(readManifest(stream).records.size(), 2 * COUNT);
+}
+
+TEST(ManifestFileTest, SourceErrorAtEveryPositionIsIoErrorNotATornTail) {
+  WrittenManifest manifest = writeManifest();
+  for (size_t failAt = 0; failAt <= manifest.bytes.size(); ++failAt) {
+    SCOPED_TRACE(failAt);
+    FailingSource source(manifest.bytes.data(), manifest.bytes.size(), failAt);
+    EXPECT_EQ(readManifest(source).status, RecordStatus::IoError);
+  }
+}
+
+TEST(ManifestFileTest, TornEndRepeatsOnEveryLaterCall) {
+  WrittenManifest manifest = writeManifest();
+  MemoryRecordStream stream(manifest.bytes.data(), manifest.bytes.size(), manifest.bytes.size() - 1);
+  RecordReader reader(stream, RecordFileKind::Manifest);
+  SyncRecord record;
+  while (reader.next(record) == RecordStatus::Record) {
+  }
+  EXPECT_EQ(reader.next(record), RecordStatus::End);
+  EXPECT_TRUE(reader.tornTail());
+  EXPECT_EQ(reader.endOffset(), manifest.records.back().offset);
+}
