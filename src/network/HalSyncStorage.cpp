@@ -3,7 +3,9 @@
 #include <Logging.h>
 #include <SyncPathFold.h>
 
+#include <algorithm>
 #include <cstring>
+#include <iterator>
 
 namespace {
 
@@ -22,14 +24,9 @@ HalSyncStorage::~HalSyncStorage() {
 }
 
 SyncFile* HalSyncStorage::open(const char* path, SyncOpenMode mode) {
-  Slot* slot = nullptr;
-  for (Slot& candidate : slots) {
-    if (!candidate.inUse) {
-      slot = &candidate;
-      break;
-    }
-  }
-  if (!slot) {
+  Slot* const slot =
+      std::find_if(std::begin(slots), std::end(slots), [](const Slot& candidate) { return !candidate.inUse; });
+  if (slot == std::end(slots)) {
     LOG_ERR("GSYNC", "No free file slot for %s", path);
     return nullptr;
   }
@@ -60,12 +57,9 @@ SyncFile* HalSyncStorage::open(const char* path, SyncOpenMode mode) {
 }
 
 void HalSyncStorage::close(SyncFile* file) {
-  for (Slot& slot : slots) {
-    if (&slot == file && slot.inUse) {
-      slot.release();
-      return;
-    }
-  }
+  Slot* const slot =
+      std::find_if(std::begin(slots), std::end(slots), [file](const Slot& s) { return &s == file && s.inUse; });
+  if (slot != std::end(slots)) slot->release();
 }
 
 bool HalSyncStorage::exists(const char* path) { return Storage.exists(path); }

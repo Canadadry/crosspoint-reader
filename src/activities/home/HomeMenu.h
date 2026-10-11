@@ -1,5 +1,8 @@
 #pragma once
 
+#include <algorithm>
+#include <iterator>
+
 // Values are appended, never inserted; the display order comes from home_menu's table.
 enum class HomeMenuItem { NONE, FILE_BROWSER, RECENTS, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU, GIT_SYNC };
 
@@ -37,11 +40,8 @@ constexpr bool isVisible(const Row& row, HomeMenuOptions options) {
 
 // Number of menu rows, recent book covers excluded.
 constexpr int itemCount(HomeMenuOptions options) {
-  int count = 0;
-  for (const Row& row : ROWS) {
-    if (isVisible(row, options)) ++count;
-  }
-  return count;
+  return static_cast<int>(
+      std::count_if(std::begin(ROWS), std::end(ROWS), [options](const Row& row) { return isVisible(row, options); }));
 }
 
 // 0 for NONE and for an item the options hide.

@@ -1,14 +1,15 @@
 #include "ProtectedPath.h"
 
+#include <algorithm>
+#include <iterator>
+
 namespace {
 constexpr std::string_view PROTECTED_NAMES[] = {"System Volume Information", "XTCache"};
 
 bool isProtectedName(std::string_view name) {
   if (!name.empty() && name.front() == '.') return true;
-  for (const auto item : PROTECTED_NAMES) {
-    if (name == item) return true;
-  }
-  return false;
+  return std::any_of(std::begin(PROTECTED_NAMES), std::end(PROTECTED_NAMES),
+                     [name](std::string_view item) { return name == item; });
 }
 }  // namespace
 
