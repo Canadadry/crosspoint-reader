@@ -5,7 +5,7 @@
     - [x] Blob hasher and hex helpers
   - [x] Step 1.2 — Path filter
     - [x] Path filter with verdicts
-  - [ ] Step 1.3 — Trees response parser
+  - [x] Step 1.3 — Trees response parser
     - [x] Top-level shape
     - [x] Blob records
     - [x] Skips

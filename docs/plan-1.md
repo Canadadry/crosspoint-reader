@@ -451,3 +451,24 @@ Done 2026-10-11 by the owner, with curl from macOS and a fine-grained token sent
   `/.crosspoint/`. FAT-forbidden printable characters and case clashes stay with steps 5/6.
 - Tests: `test/git_sync_path_filter/` (13 cases). Build net green.
 - No `guideline` decisions.
+
+### Step 1.3
+
+- `lib/GitSync/GitTreeParser.{h,cpp}`: `GitTreeParser(ctx, onRecord)` fed in chunks;
+  `GitTreeRecord {path, pathLen, sha[20], size}` per blob through
+  `bool (*)(void*, const GitTreeRecord&)`, returning false aborts. `isComplete()`,
+  `isTruncated()`, `hasError()`, `wasAborted()`, `treeSha()` and three counters.
+  About 1.1 KB, no heap: held as a member or through `makeUniqueNoThrow`.
+- The parser does not filter paths: the caller applies `classifySyncPath`.
+- Records are usable only when `isComplete() && !isTruncated()`; a cut-off body is never
+  complete, so it cannot turn into deletions.
+- A blob with a missing or invalid SHA, size, path or type fails the whole response
+  rather than being skipped, since a skipped entry would look deleted to the planner.
+- Over-long paths (512+ bytes, dropped by `StreamingJsonParser`) and paths still holding
+  a backslash after decoding (`\uXXXX` is not decoded) are skipped, counted and logged
+  by SHA. Neither can be in the manifest, so the skip never deletes anything.
+- Tests: `test/git_sync_tree_parser/` (35 cases) with `TreeFixture.h`, a body exported
+  from a real git repository, with the content of each blob, reusable by step 6. The
+  over-long cases use separate small bodies so the fixture stays a real tree.
+- First GitSync module to log: host tests use a no-op `stubs/Logging.h`.
+- Build net green. No `guideline` decisions.
