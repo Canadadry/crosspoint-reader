@@ -393,9 +393,18 @@ in `.claude/skills/` use (`git-commit`, `tdd`, `check-build`):
     - Wi-Fi drops mid-download and the next run recovers;
     - free heap stays at or above 50 KB during a sync (`LOG_DBG` `ESP.getFreeHeap()`);
       the log shows free heap before the sync and the lowest value during it, so the
-      measured peak can be compared with the 64 KB budget.
+      measured peak can be compared with the 64 KB budget;
+    - a push that adds at least 50 small files, then Update: Added = N, no reboot and no
+      "Not enough memory"; record the lowest free heap; the serial capture has no
+      `abort()` and no `Guru Meditation`; then remove the files from the repository (a
+      bulk delete);
+    - with File Transfer running, `/download?path=/.crosspoint/github-sync.json`, WebDAV
+      `GET /.crosspoint/github-sync.json` and WebDAV `PROPFIND /.crosspoint` all answer
+      403, with no token text and no listing.
 
-    *Verified by*: the doc renders and every step matches the implemented behaviour.
+    *Verified by*: the doc renders and every step matches the implemented behaviour; the
+    guide's File Transfer statement is checked against every `WebDAVHandler::handle*` and
+    every `server->on` path handler.
 
 ## 4. Done when
 
@@ -724,3 +733,131 @@ Done 2026-10-11 by the owner, with curl from macOS and a fine-grained token sent
   eight entry points and for WebDAV. The new host test fails on the old rule. WebDAV
   PROPFIND may still list `/.crosspoint`: an unproven lead, left unchanged.
 - Build net green.
+
+### Step 3.12
+
+- `USER_GUIDE.md` § 3.9 GitHub Library Sync (placed after 3.8, nine `####` parts:
+  What You Need, Creating the Access Token, Writing the Configuration File, Preparing the
+  First Sync, Running an Update, What Update Changes, What Update Never Touches, Limits
+  and Skipped Files, Messages and What to Do), plus a sentence in 3.1 Home Screen and one
+  in 7 Troubleshooting (deleting `.crosspoint` deletes the config and the sync record).
+  The table of contents is updated and every anchor checked.
+- The example JSON uses placeholders only. The token is a fine-grained PAT for one
+  repository, Contents: Read-only, with an expiry; the guide says plainly that GitHub's
+  certificate is not verified, and gives the mitigations.
+- Every quoted on-screen string is verbatim from `english.yaml`; every behaviour is
+  traced to a step note or the source. Points where the guide follows the code rather
+  than the PRD's wording: a refused redirect on a book stops the run partway; leaving
+  the sync screen restarts to Home whenever Wi-Fi was on; a name with `\` is ignored and
+  logged rather than counted as skipped.
+- End-of-phase-2 review (`warn-review`, then `plan-review`), two accepted method changes:
+  the guide's File Transfer statement is checked against every WebDAV and web-server
+  path handler, and the checklist gains a 50-file sync. The check found that WebDAV
+  PROPFIND listed `/.crosspoint`; fixed with `fix-bug` in its own `fix:` commit
+  (403 before the exists check, as GET does), so the guide can say the file cannot be
+  listed. The other warnings (duplicated wipe and Wi-Fi helpers, header hygiene, the
+  web server's untranslated HTTP messages, which match that file) were judged not to
+  change the odds.
+- Step 11 hypotheses H-11-1 to H-11-6 held. No `guideline` decisions in this step.
+
+#### Owner's on-device checklist
+
+Run it on a `default`-environment build (log level 2, serial on), with the serial log captured
+through `python3 scripts/debugging_monitor.py`. File a failed item with the `fix-bug` skill.
+
+**Setup and home menu**
+
+- [ ] No config file: no Update Library entry, and the serial log has no `GSYNC` line on
+  entering the Home screen.
+- [ ] A broken config (for example a missing `token`): no entry; the log shows a `GSYNC`
+  error naming the field.
+- [ ] Copy a valid config over USB (or with the card in a computer), return to Home without
+  restarting: the entry appears; Confirm (and a tap on touch devices) opens the sync screen.
+- [ ] Lyra theme: the row shows the download icon.
+- [ ] Known limitation (not fixed in step 11): with OPDS servers and sync configured, on a
+  button device, Classic's sixth row runs about 10 px into the button hints (label
+  readable) and Lyra 3 Covers' Settings row about 36 px (label partly hidden).
+  *Record:* what is visible on each theme.
+- [ ] Break the config while on the Home screen, then open Update Library: the "Sync
+  settings missing or invalid" screen, no Wi-Fi start; Back returns to Home with the cursor
+  on Update Library.
+
+**First sync**
+
+- [ ] Card prepared by copying the repository's files: the first sync adopts everything with
+  zero downloads (Added 0, Updated 0, "Already on card" = number of files).
+  *Record:* the file count, the library size in GB and the duration of the first sync.
+- [ ] A dot folder in the repository (e.g. `.atelier/`) is not created on the card.
+- [ ] Back during the first sync's adoption ("Checking"), then Update again: it resumes
+  without re-hashing the files already adopted (the new total is the old total minus the
+  files already done, and it finishes faster).
+
+**Changes**
+
+- [ ] Push an added book and a modified book: Added 1, Updated 1; the modified book
+  reopens at the beginning, its bookmarks are kept.
+- [ ] Delete the only book of a folder in the repository: Deleted 1, the folder is removed;
+  a folder of your own that is empty is not.
+- [ ] Move the book currently being read to another folder in the repository: Moved 1, no
+  download; reopening it keeps its progress and bookmarks; the Recent Books list and the
+  Home cover tile show it with its cover; after a restart, the reader reopens it at the same
+  page.
+- [ ] A book copied over USB outside the repository's paths is untouched after an Update.
+- [ ] Two paths differing only by case, and a name containing `:`: "Skipped (name
+  conflict): 2" on this run and the next, nothing deleted.
+- [ ] An Update with no change: "Already up to date".
+
+**Interruptions**
+
+- [ ] Back mid-sync during downloads ("Stopping after the current file...", then "Sync
+  stopped"), then Update again: it resumes and finishes; no partial book at any target path.
+- [ ] Touch device: the home gesture mid-sync stops it and goes Home.
+- [ ] Wi-Fi dropped mid-download (router off): "Network lost. Press Update again to
+  resume."; with Wi-Fi back, the next run recovers and the summary counts only what was
+  left.
+- [ ] Reset button pressed mid-download: after restart, no half-written book; Update
+  finishes the job.
+- [ ] With Time to Sleep at 1 minute, a sync longer than a minute does not sleep.
+- [ ] Leaving the Done screen after a Wi-Fi sync restarts to Home; reading state intact.
+
+**Security**
+
+- [ ] A full serial capture of a sync (debug build) contains no part of the token: search it
+  for `github_pat_` and for the token's last 8 characters; zero hits.
+- [ ] An expired or revoked token: "Cannot read the repository. Check token, name and
+  Wi-Fi.", nothing changed on the card.
+- [ ] Optional, needs a man-in-the-middle proxy you control (e.g. mitmproxy on a laptop
+  hotspot, answering the trees request with a 302 to another host): "GitHub redirected to
+  another site. Sync stopped.", nothing changed, and the proxy log shows no
+  `Authorization` header sent to the other host.
+- [ ] With File Transfer running (Join a Network), from a computer on the same network
+  (for example with `curl -i`): `GET /download?path=/.crosspoint/github-sync.json`,
+  `GET /api/files?path=/.crosspoint`, WebDAV `GET /.crosspoint/github-sync.json` and
+  `curl -i -X PROPFIND -H "Depth: 1" http://<ip>/.crosspoint` all answer **403**, with no
+  token text and no listing. `PROPFIND /` still answers 207 and does not list
+  `.crosspoint`.
+
+**Screens**
+
+- [ ] The progress screen and the Done screen (a summary with Failed and Skipped lines, and
+  one error) in all four orientations: nothing clipped or overlapping. *Record:* any
+  orientation where the progress percentage looks off-centre (known cosmetic point of step
+  2.10, landscape).
+
+**Measurements** (from the `GSYNC` log lines of one sync that downloads at least one file)
+
+- [ ] Free heap stays at or above 50 KB during the sync. *Record:* "Heap before sync: free
+  …, largest block …" and "Lowest free heap during sync: …", and their difference. The
+  difference holds the sync's peak (budget 64 KB, 61,744 B computed, of which the
+  4 KB transient request/save line is an estimate) plus the TLS session, which the budget excludes; if it is
+  above 64 KB, also watch the free-RAM graph of the debugging monitor during an OPDS download
+  (same TLS transport) to size the TLS part.
+- [ ] The transient 4 KB line: the lowest value is taken over the whole run, downloads
+  included, so it is covered by the item above; *Record:* whether the lowest value occurred
+  during the tree download, the planning or the downloads (watch the graph).
+- [ ] A push that adds at least 50 small files, then Update: Added = N, no reboot and no
+  "Not enough memory". *Record:* the "Lowest free heap during sync" line. The serial
+  capture has no `abort()` and no `Guru Meditation`. Then remove the files from the
+  repository and run Update again (a bulk delete): Deleted = N.
+- [ ] Stack: after a run that includes a TLS fetch, "Loop task stack high-water mark: …
+  bytes" is at least 1,024. *Record:* the value.

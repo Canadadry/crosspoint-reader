@@ -42,7 +42,7 @@
   - [x] Step 2.11 — Home menu entry
     - [x] HomeMenu index module
     - [x] Update entry
-- [ ] Phase 3 — Documentation and hand-off
-  - [ ] Step 3.12 — User guide
+- [x] Phase 3 — Documentation and hand-off
+  - [x] Step 3.12 — User guide
 - [x] Fix: web server refuses every protected path segment
 - [x] Fix: WebDAV PROPFIND refuses protected paths
