@@ -35,6 +35,20 @@ The goals behind every rule below:
   *Contents: Read* only. `HttpDownloader` already sends preemptive Basic auth
   (`src/network/HttpDownloader.cpp:84-88`, in `runGetWolf`), and GitHub accepts the token as the password
   of Basic auth.
+- **TLS is verified for GitHub** (owner decision, 2026-10-11). The token never goes out
+  over an unverified connection: the sync's requests pin the root CAs of `api.github.com`
+  instead of `setInsecure()` (`src/network/HttpDownloader.cpp:75`). The SDK supports it
+  through `SecureHttpClient::setCACert` (`freeink-sdk/libs/network/SecureNet/include/SecureHttpClient.h:70-73`),
+  which loads one PEM buffer, so several roots can be concatenated.
+  - The roots are a `constexpr` PEM bundle in flash. It covers GitHub's current chain and
+    its previous CA, so a CA rotation does not break the sync.
+  - An optional `/.crosspoint/github-ca.pem` overrides the bundle, so the owner can follow
+    a rotation without a firmware update.
+  - The certificate's host name must be `api.github.com` (see section 5: this needs an SDK
+    change).
+  - A verification failure aborts the sync with a clear message, and changes nothing on the
+    card.
+  - Other features (OPDS, OTA, KOReader) keep their current behaviour: out of scope here.
 - **Configuration file**: `/.crosspoint/github-sync.json`, written by the owner from a PC.
   There is no on-device editing and no keyboard entry of the token.
 
@@ -313,10 +327,16 @@ in `.claude/skills/` use (`git-commit`, `tdd`, `check-build`):
    - an optional extra request header for the `Accept` value;
    - a "no cross-host redirect when credentials are set" guard.
 
+   - certificate verification for the sync's requests: `setCACert` with the pinned roots
+     instead of `setInsecure()`, opt-in per call so OPDS, OTA and KOReader keep their
+     current behaviour.
+
    Both land on the compiled `runGetWolf` path, and on the `esp_http_client` path too if
    it is kept. Existing callers are unchanged.
    *Verified by*: `pio run`; a review naming the `#if` branch each change lands in; and a
-   review that OPDS, OTA and KOReader call sites compile unchanged.
+   review that OPDS, OTA and KOReader call sites compile unchanged. On the device (step 12
+   checklist), a sync succeeds with the real roots, and fails with a clear error when the
+   override file holds an unrelated root.
 9. **Sync engine glue** (`src/network/GitSync*.cpp` or `src/util/`). It wires the step 6
    executor to the device:
    - the `HalStorage` implementation of its storage interface;
@@ -367,6 +387,9 @@ in `.claude/skills/` use (`git-commit`, `tdd`, `check-build`):
     - Back during the first sync's adoption, then Update again, resumes without re-hashing
       the files already adopted;
     - the duration of the first sync, recorded with the library's file count;
+    - a sync with the built-in roots succeeds; putting an unrelated root in
+      `/.crosspoint/github-ca.pem` makes it fail with a clear message and no change on the
+      card;
     - the stack high-water mark of the sync's context (`uxTaskGetStackHighWaterMark`),
       logged after a run that includes a TLS fetch, with at least 1 KB left;
     - Wi-Fi drops mid-download and the next run recovers;
@@ -393,13 +416,13 @@ in `.claude/skills/` use (`git-commit`, `tdd`, `check-build`):
   with Basic auth. If it redirects, fall back to
   `GET /repos/{owner}/{repo}/contents/{path}?ref={commit}` with the same header, and keep
   the no-cross-host-redirect guard.
-- **TLS without certificate verification (owner to rule).** The compiled HTTP path calls
-  `http.setInsecure()` (`src/network/HttpDownloader.cpp:75`), so the token would go out
-  over TLS without server certificate verification. On a hostile network, a
-  man-in-the-middle could capture a token with read access to the private repository.
-  Before step 8, the owner decides whether to accept this, or whether step 8 must enable
-  verification for `api.github.com` (which needs CA support in `freeink::SecureHttpClient`,
-  not checked here: `freeink-sdk/` is empty in this checkout).
+- **Hostname check needs an SDK change.** `freeink::SecureClient` loads the pinned CA
+  (`wolfSSL_CTX_load_verify_buffer`, `freeink-sdk/libs/network/SecureNet/src/SecureClient.cpp:87-89`)
+  but never calls `wolfSSL_check_domain_name`, so any certificate chaining to that CA passes,
+  whatever its host name. The SDK is the `freeink-sdk` git submodule (upstream
+  `Free-Ink/freeink-sdk`), not this repository. Before step 8, the owner decides how the
+  check lands: an upstream SDK pull request with the submodule bumped, or a fork of the
+  submodule. Until then step 8 stops after the CA pinning, and says so in its note.
 
 ## 6. Step notes
 
