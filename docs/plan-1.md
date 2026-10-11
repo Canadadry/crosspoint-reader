@@ -438,3 +438,16 @@ Done 2026-10-11 by the owner, with curl from macOS and a fine-grained token sent
   with clang-format 21. The sandbox needed the `pioarduino` PyPI package and the proxy CA
   in certifi to build; nothing in the repository changed for it.
 - No `guideline` decisions.
+
+### Step 1.2
+
+- `lib/GitSync/SyncPath.{h,cpp}`: `classifySyncPath(const char*, size_t)` returns
+  `Syncable`, `Hidden`, `Malformed` or `TooLong`; `isSyncablePath` is the boolean shortcut.
+  The caller logs `Malformed` and `TooLong`, and skips `Hidden` quietly.
+- `MAX_SYNC_PATH_BYTES = 255` UTF-8 bytes: below the trees parser's 512-byte token buffer,
+  and every segment then fits SdFat's 255-unit long name limit.
+- Beyond the plan's list, a segment starting with a space and any byte below 0x20 are
+  `Malformed`: SdFat skips leading spaces, so ` .crosspoint/x` would have reached
+  `/.crosspoint/`. FAT-forbidden printable characters and case clashes stay with steps 5/6.
+- Tests: `test/git_sync_path_filter/` (13 cases). Build net green.
+- No `guideline` decisions.
