@@ -495,3 +495,33 @@ Done 2026-10-11 by the owner, with curl from macOS and a fine-grained token sent
 - Tests: `test/git_sync_record_format/` (61 cases), covering truncation and a source
   error at every byte, bit flips, and the grammar rules. Build net green.
 - No `guideline` decisions.
+
+### Step 1.5
+
+- `lib/GitSync/SyncPathFold.{h,cpp}`: a port of SdFat 2.3.1's `toUpcase` as `constexpr`
+  tables (checked equal over 0..0xFFFF), `syncPathsEqualFolded`, `syncPathKey`
+  (FNV-1a over folded units) and `isFatSafeName`.
+- `lib/GitSync/SyncPlanner.{h,cpp}`: `plan(manifest, tree, localExists, existsCtx, sink)`
+  with `SyncOpSink {ctx, onOp, onTotal}`. `onTotal` is called once before the first op,
+  0 included, so the progress screen can show n/total. Ops are emitted in this order:
+  Move, AdoptOrDownload, Download, Delete, Prune, Skip.
+- **Cap: `MAX_SYNC_FILES = 2000`, holding even when every file moves.** Each file costs
+  one 12-byte slot (4-byte SHA prefix, folded path key, 24-bit offset plus state), and
+  there are 2 × cap slots. `sizeof(SyncPlanner)` is 48,960 B, with a `static_assert` at
+  51,200 B. Every prefix or key match is confirmed by reading the record back, and SD
+  reads stay at or below 5 × entries + 16.
+  The first PRD draft gave 1,300; I had it reworked to reach the plan's ~2,000.
+- Outcomes pinned by the tests:
+  - a case-only rename with the same SHA is a no-op;
+  - a swap is two replacing Downloads;
+  - for remote paths that differ only by case, the manifest's path or the byte-wise
+    smallest one wins, and the others give a `Skip(CaseCollision)` on every run, never
+    a delete;
+  - a FAT-forbidden name gives a `Skip(UnsafeName)`;
+  - a move within a folder gets no Prune;
+  - the existence table: source only → Move; destination only → Move to resume; both
+    or neither → Delete plus AdoptOrDownload or Download.
+- The planner requires a compacted manifest (`ManifestNotCompacted` otherwise). The
+  caller allocates it with `makeUniqueNoThrow` and frees it after the plan.
+- Tests: `test/git_sync_path_fold/` (11 cases) and `test/git_sync_planner/` (51 cases).
+  Build net green. No `guideline` decisions.

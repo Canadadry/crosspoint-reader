@@ -13,7 +13,7 @@
     - [x] Tree files: CRC, streams, writer, reader
     - [x] Manifest base and journal
     - [x] Compactor and docs
-  - [ ] Step 1.5 — Sync planner
+  - [x] Step 1.5 — Sync planner
     - [x] Path folding
     - [x] Planner core
     - [x] Moves and collisions
