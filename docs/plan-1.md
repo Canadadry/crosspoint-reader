@@ -620,3 +620,47 @@ Done 2026-10-11 by the owner, with curl from macOS and a fine-grained token sent
   - fonts: `FontDownloadActivity.cpp:129`, `:451`.
   KOReader does not use `HttpDownloader`. Nothing switches on `DownloadError`.
 - Build net green. No `guideline` decisions.
+
+### Step 2.9
+
+- Pure parts in `lib/GitSync/`, host-tested:
+  - `SyncBudget.h`: `SYNC_HEAP_BUDGET_BYTES = 65536`, split into planner 51,200,
+    executor 3,072 and glue 11,264 (tree writer 2,048, borrowed from the planner's share
+    since the two never coexist). The planner and executor `static_assert`s use it.
+  - `GitHubApi`: trees and blob URLs in a 448 B buffer; Accept constants; Basic user `x`.
+  - `GitBlobSourceHash`: hashes a local file in caller-supplied 4 KB chunks.
+  - `TreeSnapshotWriter`: parser, `classifySyncPath` and `RecordWriter` into
+    `tree.tmp`. It stops the download at the first file past the cap and seals only a
+    complete, untruncated tree. Rejected paths are logged by SHA, never by text.
+  - `GitSyncRun`: `runGitSync(storage, transport, hooks, progress)` runs prepare, tree,
+    plan and apply, then removes `tree.tmp`. It latches cancel, stops after three
+    consecutive network errors or a refused redirect, and logs one end line for every
+    outcome that is not Ok. The report is `GitSyncReport {GitSyncError, SyncRunResult,
+    tree counts}`, with 11 `GitSyncError` values.
+- Device parts in `src/network/`, checked by `pio run` and review:
+  - `HalSyncStorage` gives three fixed `HalFile` slots. Rename checks `exists(to)`, and
+    SdFat's `O_EXCL` backs it up. FAT-unsafe names are refused. `flush()` reports a
+    latched short write. Known limits: case folding is SdFat's own, and the "open file"
+    rule is kept by the executor's call order.
+  - `GitSyncEngine` (`git_sync_engine::run(config, progress)`) goes through
+    `HttpDownloader::fetchStream` with the guard on. The move hook calls
+    `RECENT_BOOKS.updatePath` with `bookCacheDir` paths, then sets and saves
+    `APP_STATE.openEpubPath`; the modify hook is `clearBookCache`. It refuses an empty
+    token and checks the heap before reserving its two strings.
+- Logging review: every status-returning call in the glue has a `LOG_ERR`, listed in the
+  chunk 5 report. `RecentBooksStore::updatePath` and `clearBookCache` return void.
+- Grep of the new `src/` files: no `std::hash`, `epub_`/`txt_`/`xtc_`, or bookmarks
+  literal. The only `.json` hit is the step 2.7 config path.
+- **Peak heap**, objects alive at the same moment, TLS excluded, device sizes measured
+  on RISC-V (planner 48,920, executor 2,312, tree writer 1,552, engine context 592):
+
+  | Phase | By shares | Measured |
+  | --- | --- | --- |
+  | Prepare (executor, compactor, 8 KB scratch, glue state) | 18,624 B | 17,864 B |
+  | Tree download (glue, executor, tree writer) | 16,128 B | 14,376 B |
+  | Apply (glue, executor, planner) | 65,280 B | 61,744 B |
+
+  Apply is the peak, within the 65,536 B budget. The glue's 4,096 B transient line
+  (one HTTP request or one JSON save) can only be measured on the device (step 12).
+- Tests: `git_sync_github_api` (13), `git_sync_tree_snapshot` (13), `git_sync_run` (32),
+  plus 7 hash cases. Build net green. No `guideline` decisions.

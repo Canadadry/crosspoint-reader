@@ -30,7 +30,7 @@
   - [x] Step 2.8 — HTTP additions
     - [x] URL origin helper
     - [x] HttpDownloader wiring
-  - [ ] Step 2.9 — Sync engine glue
+  - [x] Step 2.9 — Sync engine glue
     - [x] Budget constant and pure helpers
     - [x] Tree snapshot writer
     - [x] Sync run
