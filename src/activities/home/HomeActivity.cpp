@@ -21,6 +21,7 @@
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "network/GitSyncConfigLoader.h"
 
 namespace {
 
@@ -37,6 +38,7 @@ const char* menuItemLabel(HomeMenuItem item) {
     case HomeMenuItem::SETTINGS_MENU:
       return tr(STR_SETTINGS_TITLE);
     case HomeMenuItem::GIT_SYNC:
+      return tr(STR_GIT_SYNC_MENU);
     case HomeMenuItem::NONE:
       break;
   }
@@ -56,6 +58,7 @@ UIIcon menuItemIcon(HomeMenuItem item) {
     case HomeMenuItem::SETTINGS_MENU:
       return Settings;
     case HomeMenuItem::GIT_SYNC:
+      return Sync;
     case HomeMenuItem::NONE:
       break;
   }
@@ -149,7 +152,7 @@ void HomeActivity::onEnter() {
   Activity::onEnter();
 
   menuOptions.opds = OPDS_STORE.hasServers();
-  menuOptions.gitSync = false;
+  menuOptions.gitSync = git_sync_config::exists();
 
   const auto& metrics = UITheme::getInstance().getMetrics();
   loadRecentBooks(metrics.homeRecentBooksCount);
@@ -232,6 +235,8 @@ void HomeActivity::loop() {
         onSettingsOpen();
         break;
       case HomeMenuItem::GIT_SYNC:
+        onGitSyncOpen();
+        break;
       case HomeMenuItem::NONE:
         break;
     }
@@ -397,3 +402,5 @@ void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
+
+void HomeActivity::onGitSyncOpen() { activityManager.goToGitSync(); }

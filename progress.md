@@ -41,6 +41,6 @@
     - [x] Sync run, progress and summary
   - [ ] Step 2.11 — Home menu entry
     - [x] HomeMenu index module
-    - [ ] Update entry
+    - [x] Update entry
 - [ ] Phase 3 — Documentation and hand-off
   - [ ] Step 3.12 — User guide
