@@ -10,6 +10,9 @@
     - [x] Blob records
     - [x] Skips
   - [ ] Step 1.4 — Manifest and tree record format
+    - [x] Tree files: CRC, streams, writer, reader
+    - [ ] Manifest base and journal
+    - [ ] Compactor and docs
   - [ ] Step 1.5 — Sync planner
   - [ ] Step 1.6 — Sync executor
 - [ ] Phase 2 — Device integration
