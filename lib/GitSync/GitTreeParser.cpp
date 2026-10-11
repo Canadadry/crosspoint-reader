@@ -1,8 +1,12 @@
 #include "GitTreeParser.h"
 
+#include <Logging.h>
+
 #include <cstring>
 
 namespace {
+
+constexpr const char* LOG_TAG = "GITTREE";
 
 bool textIs(const char* text, size_t len, const char* name) {
   return len == strlen(name) && memcmp(text, name, len) == 0;
@@ -45,12 +49,16 @@ void GitTreeParser::reset() {
   error = false;
   aborted = false;
   memset(sha, 0, sizeof(sha));
+  emitted = 0;
+  skippedLongPath = 0;
+  skippedEscapedPath = 0;
   beginEntry();
 }
 
 void GitTreeParser::beginEntry() {
   entryType = EntryType::Invalid;
   entryPathRead = false;
+  entryPathOverflowed = false;
   entryShaRead = false;
   entrySizeRead = false;
   entryPathLen = 0;
@@ -59,14 +67,28 @@ void GitTreeParser::beginEntry() {
 }
 
 // A blob that cannot be read exactly fails the whole response: skipping it would look like a deletion.
+// Only a path the sync could never have stored on the card (over-long or mis-decoded) is skipped.
 void GitTreeParser::endEntry() {
-  if (entryType == EntryType::Blob && entryPathRead && entryShaRead && entrySizeRead) {
+  if (entryType == EntryType::Blob && entryPathOverflowed) {
+    skipEntry("path over the JSON token buffer", skippedLongPath);
+  } else if (entryType == EntryType::Blob && entryPathRead && memchr(entryPath, '\\', entryPathLen) != nullptr) {
+    skipEntry("path with an undecoded escape", skippedEscapedPath);
+  } else if (entryType == EntryType::Blob && entryPathRead && entryShaRead && entrySizeRead) {
     GitTreeRecord record{entryPath, entryPathLen, {}, entrySize};
     memcpy(record.sha, entrySha, sizeof(record.sha));
+    emitted++;
     if (!onRecord(recordCtx, record)) aborted = true;
   } else if (entryType != EntryType::Ignored) {
     error = true;
   }
+}
+
+// The path is not logged: it is truncated or mis-decoded.
+void GitTreeParser::skipEntry(const char* reason, size_t& counter) {
+  counter++;
+  char hex[SHA_HEX_LENGTH + 1] = "(no valid sha)";
+  if (entryShaRead) shaToHex(entrySha, hex);
+  LOG_ERR(LOG_TAG, "Skipped blob %s: %s", hex, reason);
 }
 
 void GitTreeParser::feed(const char* data, size_t len) {
@@ -87,7 +109,9 @@ GitTreeParser::PendingKey GitTreeParser::takePendingKey() {
   return key;
 }
 
+// A `path` key still pending at the next key or the entry end lost its value to the token buffer.
 void GitTreeParser::onKey(const char* key, size_t len) {
+  if (pendingKey == PendingKey::EntryPath) entryPathOverflowed = true;
   pendingKey = PendingKey::None;
   if (inEntry()) {
     if (textIs(key, len, "path")) {
@@ -182,6 +206,7 @@ void GitTreeParser::onContainerStart(bool isArray) {
 }
 
 void GitTreeParser::onContainerEnd() {
+  if (pendingKey == PendingKey::EntryPath) entryPathOverflowed = true;
   pendingKey = PendingKey::None;
   if (depth == 0) return;
   depth--;

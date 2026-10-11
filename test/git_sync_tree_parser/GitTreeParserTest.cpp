@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iterator>
 #include <random>
 #include <string>
 #include <vector>
@@ -58,6 +59,9 @@ void expectFixtureResult(Harness& h) {
   EXPECT_FALSE(h.parser.wasAborted());
   EXPECT_EQ(shaHex(h.parser.treeSha()), TREE_FIXTURE_SHA_HEX);
   EXPECT_EQ(h.records, fixtureRecords());
+  EXPECT_EQ(h.parser.emittedCount(), std::size(TREE_FIXTURE_BLOBS));
+  EXPECT_EQ(h.parser.skippedLongPathCount(), 0u);
+  EXPECT_EQ(h.parser.skippedEscapedPathCount(), 0u);
 }
 
 // Indents like a pretty-printing JSON encoder; the fixture's strings hold no quote or brace.
@@ -80,11 +84,28 @@ std::string prettyPrinted(const std::string& minified) {
   return out + "\n";
 }
 
+// Seed 0 feeds byte by byte; any other seed feeds random chunks of 1 to 64 bytes.
+void feedInChunks(Harness& h, const std::string& body, uint32_t seed) {
+  std::mt19937 rng(seed);
+  std::uniform_int_distribution<size_t> chunkSize(1, 64);
+  for (size_t pos = 0; pos < body.size();) {
+    const size_t len = std::min(seed == 0 ? 1 : chunkSize(rng), body.size() - pos);
+    h.parser.feed(body.data() + pos, len);
+    pos += len;
+  }
+}
+
 std::string bodyWithEntries(const std::string& entries) {
   return std::string(R"({"sha":")") + TREE_SHA_HEX + R"(","tree":[)" + entries + R"(],"truncated":false})";
 }
 
 constexpr const char* README_SHA_HEX = "4f9fafdb6017bcf0a8f4eb0bf9b7475e447afa73";
+constexpr const char* DUNE_SHA_HEX = "7847c49a26553609b8fe1881d5fb40c1a818eb40";
+
+std::string blobEntry(const std::string& path, const char* shaHex = README_SHA_HEX, uint64_t size = 8) {
+  return R"({"path":")" + path + R"(","mode":"100644","type":"blob","sha":")" + shaHex + R"(","size":)" +
+         std::to_string(size) + "}";
+}
 
 std::string emptyTreeBody(const char* truncated = "false") {
   return std::string(R"({"sha":")") + TREE_SHA_HEX +
@@ -290,14 +311,8 @@ TEST(GitTreeParser, FixtureFedInRandomChunksYieldsItsBlobs) {
   const std::string body = TREE_FIXTURE_BODY;
   for (const uint32_t seed : {1u, 7u, 42u, 1234u, 99991u}) {
     SCOPED_TRACE("seed " + std::to_string(seed));
-    std::mt19937 rng(seed);
-    std::uniform_int_distribution<size_t> chunkSize(1, 64);
     Harness h;
-    for (size_t pos = 0; pos < body.size();) {
-      const size_t len = std::min(chunkSize(rng), body.size() - pos);
-      h.parser.feed(body.data() + pos, len);
-      pos += len;
-    }
+    feedInChunks(h, body, seed);
     expectFixtureResult(h);
   }
 }
@@ -453,5 +468,71 @@ TEST(GitTreeParser, ResetAfterAFixtureParseOrAnEntryErrorGivesTheFixtureResult) 
     h.records.clear();
     h.feed(TREE_FIXTURE_BODY);
     expectFixtureResult(h);
+  }
+}
+
+TEST(GitTreeParser, OverLongPathIsSkippedAndTheNextBlobIsIntact) {
+  const std::string body =
+      bodyWithEntries(blobEntry(std::string(600, 'a')) + "," + blobEntry("Livres/SF/Dune.epub", DUNE_SHA_HEX, 5));
+  for (const uint32_t seed : {0u, 1u, 7u, 42u}) {
+    SCOPED_TRACE("seed " + std::to_string(seed));
+    Harness h;
+    feedInChunks(h, body, seed);
+
+    EXPECT_TRUE(h.parser.isComplete());
+    const std::vector<Rec> expected = {{"Livres/SF/Dune.epub", DUNE_SHA_HEX, 5}};
+    EXPECT_EQ(h.records, expected);
+    EXPECT_EQ(h.parser.emittedCount(), 1u);
+    EXPECT_EQ(h.parser.skippedLongPathCount(), 1u);
+  }
+}
+
+TEST(GitTreeParser, OverLongPathIsSkippedEvenWithoutAValidSha) {
+  Harness h;
+  h.feed(bodyWithEntries(blobEntry(std::string(600, 'a'), "not-a-sha")));
+
+  EXPECT_TRUE(h.parser.isComplete());
+  EXPECT_TRUE(h.records.empty());
+  EXPECT_EQ(h.parser.skippedLongPathCount(), 1u);
+}
+
+TEST(GitTreeParser, PathOf511BytesIsEmittedAnd512BytesIsSkipped) {
+  const std::string longest(511, 'a');
+  Harness h;
+  h.feed(bodyWithEntries(blobEntry(longest) + "," + blobEntry(std::string(512, 'b'))));
+
+  EXPECT_TRUE(h.parser.isComplete());
+  const std::vector<Rec> expected = {{longest, README_SHA_HEX, 8}};
+  EXPECT_EQ(h.records, expected);
+  EXPECT_EQ(h.parser.skippedLongPathCount(), 1u);
+}
+
+TEST(GitTreeParser, OverLongPathAsTheLastKeyOfItsEntryIsSkipped) {
+  Harness h;
+  h.feed(bodyWithEntries(std::string(R"({"type":"blob","sha":")") + README_SHA_HEX + R"(","size":8,"path":")" +
+                         std::string(600, 'a') + R"("},)" + blobEntry("Livres/SF/Dune.epub", DUNE_SHA_HEX, 5)));
+
+  EXPECT_TRUE(h.parser.isComplete());
+  const std::vector<Rec> expected = {{"Livres/SF/Dune.epub", DUNE_SHA_HEX, 5}};
+  EXPECT_EQ(h.records, expected);
+  EXPECT_EQ(h.parser.skippedLongPathCount(), 1u);
+}
+
+TEST(GitTreeParser, PathDecodedWithABackslashIsSkipped) {
+  const std::string body =
+      bodyWithEntries(blobEntry(R"(Livres/\u00c9t\u00e9.epub)") + "," + blobEntry(R"(Livres\\Dune.epub)") + "," +
+                      blobEntry("Livres/\xC3\x89t\xC3\xA9.epub") + "," + blobEntry(R"(a\"b\/c.epub)"));
+  for (const uint32_t seed : {0u, 1u, 7u, 42u}) {
+    SCOPED_TRACE("seed " + std::to_string(seed));
+    Harness h;
+    feedInChunks(h, body, seed);
+
+    EXPECT_TRUE(h.parser.isComplete());
+    const std::vector<Rec> expected = {{"Livres/\xC3\x89t\xC3\xA9.epub", README_SHA_HEX, 8},
+                                       {"a\"b/c.epub", README_SHA_HEX, 8}};
+    EXPECT_EQ(h.records, expected);
+    EXPECT_EQ(h.parser.emittedCount(), 2u);
+    EXPECT_EQ(h.parser.skippedEscapedPathCount(), 2u);
+    EXPECT_EQ(h.parser.skippedLongPathCount(), 0u);
   }
 }

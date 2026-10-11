@@ -8,7 +8,7 @@
   - [ ] Step 1.3 — Trees response parser
     - [x] Top-level shape
     - [x] Blob records
-    - [ ] Skips
+    - [x] Skips
   - [ ] Step 1.4 — Manifest and tree record format
   - [ ] Step 1.5 — Sync planner
   - [ ] Step 1.6 — Sync executor

@@ -6,6 +6,7 @@ add_executable(GitTreeParserTest
 )
 
 target_include_directories(GitTreeParserTest PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/stubs
   ${REPO_ROOT}/lib/GitSync
   ${REPO_ROOT}/lib/JsonParser
 )

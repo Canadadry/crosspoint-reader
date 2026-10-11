@@ -39,6 +39,11 @@ class GitTreeParser {
   bool wasAborted() const { return aborted; }
   // Meaningful only when isComplete().
   const uint8_t* treeSha() const { return sha; }
+  size_t emittedCount() const { return emitted; }
+  // Blobs whose path overflowed the JSON token buffer, so arrived with no value.
+  size_t skippedLongPathCount() const { return skippedLongPath; }
+  // Blobs whose decoded path holds a backslash: `\uXXXX` is not decoded, so the name would be wrong.
+  size_t skippedEscapedPathCount() const { return skippedEscapedPath; }
 
  private:
   enum class PendingKey : uint8_t { None, Sha, Tree, Truncated, EntryPath, EntryType, EntrySha, EntrySize };
@@ -71,6 +76,7 @@ class GitTreeParser {
   void onContainerEnd();
   void beginEntry();
   void endEntry();
+  void skipEntry(const char* reason, size_t& counter);
 
   StreamingJsonParser json;
   void* recordCtx;
@@ -88,10 +94,14 @@ class GitTreeParser {
   bool error;
   bool aborted;
   uint8_t sha[GitBlobHasher::SHA_SIZE];
+  size_t emitted;
+  size_t skippedLongPath;
+  size_t skippedEscapedPath;
 
   // Fields of the entry being read, acted on at its object end.
   EntryType entryType;
   bool entryPathRead;
+  bool entryPathOverflowed;
   bool entryShaRead;
   bool entrySizeRead;
   size_t entryPathLen;
