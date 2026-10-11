@@ -35,7 +35,7 @@
     - [x] Tree snapshot writer
     - [x] Sync run
     - [x] HalStorage adapter
-    - [ ] Sync engine
+    - [x] Sync engine
   - [ ] Step 2.10 — GitSyncActivity
   - [ ] Step 2.11 — Home menu entry
 - [ ] Phase 3 — Documentation and hand-off
