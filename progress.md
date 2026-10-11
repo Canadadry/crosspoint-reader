@@ -25,6 +25,8 @@
     - [x] Planner wiring and system tests
 - [ ] Phase 2 — Device integration
   - [ ] Step 2.7 — Config loader
+    - [x] Config parser
+    - [ ] Device loader
   - [ ] Step 2.8 — HTTP additions
   - [ ] Step 2.9 — Sync engine glue
   - [ ] Step 2.10 — GitSyncActivity
