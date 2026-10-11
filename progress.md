@@ -18,6 +18,11 @@
     - [x] Planner core
     - [x] Moves and collisions
   - [ ] Step 1.6 — Sync executor
+    - [x] Book cache and bookmark paths
+    - [ ] Storage interface and in-memory storage
+    - [ ] Executor core
+    - [ ] Moves and reading-state migration
+    - [ ] Planner wiring and system tests
 - [ ] Phase 2 — Device integration
   - [ ] Step 2.7 — Config loader
   - [ ] Step 2.8 — HTTP additions
