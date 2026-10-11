@@ -29,15 +29,15 @@ Follow this loop, returning to it as many times as needed:
 
 3. **Define the discriminating test.** For each hypothesis, ask: which observation would confirm it, and above all which would eliminate it? Prefer the cheapest test that separates the most hypotheses. A good test eliminates; it doesn't just reinforce.
 
-4. **Gather the proof.** Run the test and tie the result to one of the three forms of proof above. You run every test yourself, headless (see below).
+4. **Gather the proof.** Run the test and tie the result to one of the three forms of proof above. You run every test yourself, on the host (see below).
 
 5. **Update, then start over.** Depending on the result, eliminate or confirm. Until the cause is **established by proof** (not merely made probable), return to step 2 or 3. Don't stop on a hypothesis simply because it's well-ranked.
 
 ## Who runs the test
 
-You do, headless: nobody else is there. No window, no X server (`CLAUDE.md`): reproduce through a scripted `events.json`, a fixed frame count and a text dump. Throwaway programs and instrumented copies go in `tmp/`; never change `src/` or `tests/`.
+You do, on the host: nobody else is there, and there is no device. Reproduce through a gtest or a throwaway host program built against the host-buildable code (`lib/`, pure helpers in `src/util/`; see the suites under `test/` for how they link). Throwaway programs and instrumented copies go in `tmp/`; never change `src/`, `lib/` or `test/`.
 
-Your environment likely differs from the reporter's (a real window, a real OS). A test that only their environment could run is not a proof you can get: name it as the missing observation, never presume its result.
+Your environment differs from the reporter's: an ESP32-C3 with about 380 KB of RAM, a real SD card, Wi-Fi and an e-ink display. What depends on them (heap exhaustion, SD timing, TLS, refresh) cannot be proven on the host: name it as the missing observation — usually a serial log from the device (`python3 scripts/debugging_monitor.py`, with `LOG_DBG` at the right spot) — and never presume its result.
 
 ## When the report jumps to a conclusion
 

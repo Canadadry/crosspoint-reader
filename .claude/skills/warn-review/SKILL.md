@@ -1,6 +1,6 @@
 ---
 name: warn-review
-description: Internal — called by plan-pilot at each phase end. Flags design smells and pointer-rule violations as bare warnings, never fixes.
+description: Internal — called by plan-pilot at each phase end. Flags design smells and CLAUDE.md rule violations as bare warnings, never fixes.
 ---
 
 # Warn Review
@@ -29,28 +29,27 @@ Checklist (each is an outside-in hint that something is off):
 9. The largest or most complex file has little to no direct test coverage, relying only on broader end-to-end checks - the code most likely to hide bugs is the code least protected against them.
 10. A systematic audit/sweep's completeness claim (e.g. "N sites, all handled") with no mechanism (test, CI check, or process step) to catch new code later recreating the exact pattern it swept for - the confidence is frozen at audit time while the codebase keeps moving.
 
-## Project ground rules: pointers
+## Project ground rules: `CLAUDE.md`
 
-Check these too, on every run, in `src/`. Unlike the checklist above they are rules, not smells: flag every violation, still as a bare warning.
+Check these too, on every run, in `src/` and `lib/`. Unlike the checklist above they are rules, not smells: flag every violation, still as a bare warning.
 
 Why they exist, and the only two goals they serve:
 
-- **Safety**: a link to something that died must fail loudly (NULL, an `assert`), never read freed memory silently, and must not depend on someone remembering to clear it.
-- **Readability**: one name per piece of data, and a field whose meaning the type says, not a paragraph of comment about what NULL means or who writes through it.
+- **Stability on the device**: an ESP32-C3 with about 380 KB of RAM, no PSRAM, a small stack and no exceptions. An out-of-memory, a stack overflow or an unaligned read crashes the reader.
+- **Safety of the owner's data**: SD access is serialized, and errors are logged and handled rather than aborting.
 
-The rules are the means, not the goal. If code breaks one in a case nobody anticipated and the result is clearly safer or clearer than following the rule, don't flag it as a violation: report it as `file[:line]: breaks rule N on purpose`, so the user can check the reasoning. Following a rule in a way that defeats safety or readability is the violation.
+The rules are the means, not the goal. If code breaks one in a case nobody anticipated and the result is clearly safer or clearer than following the rule, don't flag it as a violation: report it as `file[:line]: breaks rule N on purpose`, so the user can check the reasoning.
 
-Allowed pointers: `self` and large structs as parameters (borrowed for the call only), `const` pointers to static never-freed data (archetypes, tables, strings), function pointers, runtime handles (`allocator_t`, `p8_graphics_t`, `p8_vram_t`), and the engine registry's internal lists. Anything else is a violation:
-
-11. A non-`const` pointer field in a game struct.
-12. A struct field pointing at another field of the same struct (`x = &self->x_own`): the component is a value.
-13. Presence or absence encoded by a NULL pointer instead of a bit in the struct's `uint16_t has`.
-14. A link to another entity held as a pointer (`entity_t *`, `planet_t *`…), alone or in a list, instead of an `entity_id_t`.
-15. A dead entity's id left in a list instead of removed at its death, or a list walk that tolerates a dead id instead of asserting.
-16. A `vec_t`, `box_t` or `p8_fixed_t` passed by pointer.
-17. A function keeping an address it received as a parameter beyond the call.
-18. A game concept (`targeting`, `emitter`, or any new one) named in `src/engine/`.
-19. A raised count or new line in `tools/pointer_guard_exceptions.txt`, a regenerated e2e `*.sha256`, or a relaxed `assert` in a change that removes pointers.
+11. A bare `new` (not `new (std::nothrow)` or `makeUniqueNoThrow`), or an allocation whose null result is not checked and logged.
+12. SD access through `SdFat`, `FsFile`, `FsBaseFile` or `SDCardManager` instead of `HalStorage` / `HalFile`.
+13. An explicit `close()` on a local file handle (outside the close-before-remove and close-before-reopen cases).
+14. A user-facing string not going through `tr()`.
+15. A hardcoded screen size (800, 480) instead of `renderer.getScreenWidth()` / `getScreenHeight()`, or a raw `HalGPIO::BTN_*` outside `ButtonRemapActivity`.
+16. A local buffer of 256 bytes or more on the stack.
+17. A `uint8_t*` cast to a wider pointer type and dereferenced, instead of `memcpy`.
+18. `std::function` or `std::string` / Arduino `String` in library code or a per-page / per-frame path; a `push_back` loop without `reserve`.
+19. An error path that returns without `LOG_ERR`, an `abort()`, or an `assert` used for a recoverable condition.
+20. A skipped or disabled test, a `cppcheck-suppress`, or a silenced warning.
 
 ## Output format
 

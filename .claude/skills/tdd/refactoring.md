@@ -8,4 +8,4 @@ After TDD cycle, look for:
 - **Feature envy** → Move logic to where data lives
 - **Primitive obsession** → Introduce value objects
 - **Existing code** the new code reveals as problematic
-- **Naked assumptions** → Add assertions: if the code silently relies on a caller invariant, make it loud
+- **Naked assumptions** → If the code silently relies on a caller invariant, check it at the boundary: `LOG_ERR` + refuse

@@ -13,7 +13,7 @@ description: Internal — called by prd-autopilot and fix-bug implementers. Red-
 
 **Bad tests** are coupled to implementation. They mock internal collaborators, test private methods, or verify through external means (like querying a database directly instead of using the interface). The warning sign: your test breaks when you refactor, but behavior hasn't changed. If you rename an internal function and tests fail, those tests were testing implementation, not behavior.
 
-**Assertions complement tests.** Tests verify behavior from the outside; assertions enforce contracts from the inside. Add assertions at module boundaries (preconditions: "this argument must be a positive number") and at key invariants ("after this operation, count must not be negative"). When a test fails because of an assertion, the error points directly to the violated contract rather than to a symptom far from the cause. See [interfaces-design.md](interfaces-design.md) for where assertions belong.
+**Contracts complement tests.** Tests verify behavior from the outside; the code enforces its contracts from the inside. On this firmware a violated contract is handled, not aborted (`CLAUDE.md` § Error Handling Philosophy): `LOG_ERR` + `return false` (or an error value) at the module boundary, so the caller can recover and the serial log names the violated contract. `assert` is only for an impossible state. A test then checks that the bad input is refused. See [interfaces-design.md](interfaces-design.md) for where checks belong.
 
 See [tests.md](tests.md) for examples and [mocking.md](mocking.md) for mocking guidelines.
 
@@ -57,7 +57,7 @@ A blocking question the inputs can't settle → end with `QUESTION:`; your calle
 
 ## Where tests live
 
-One `tests/test_<module>.c` per module, registered in the Makefile's `UNIT_TESTS`, run by `make test`. A test drives the module's public interface through the real path — "integration-style" below means that, not a new e2e. Never add a replay to `tests/e2e/`.
+Host gtest suites, one directory per module under `test/` (`test/<module_snake_case>/<Module>Test.cpp` plus a `CMakeLists.txt` listing the sources it compiles), added to `test/CMakeLists.txt` with `add_subdirectory`. See `test/opds_filename/` for the shape. Only host-buildable code can be tested: `lib/` and pure helpers in `src/util/`. Code that needs the HAL, the display or the network sits behind a narrow interface ([mocking.md](mocking.md)) so its logic stays testable. A test drives the module's public interface through the real path — "integration-style" below means that.
 
 ### 2. Tracer Bullet
 
@@ -70,7 +70,13 @@ GREEN: Write minimal code to pass → test passes
 
 This is your tracer bullet - proves the path works end-to-end.
 
-**Running tests**: `make test`, never a test binary run alone as the final check.
+**Running tests**: the full suite, never a test binary run alone as the final check:
+
+```
+cmake -S test -B build/test -G Ninja && cmake --build build/test && ctest --test-dir build/test --output-on-failure -j
+```
+
+While iterating, one suite: `cmake --build build/test --target <Module>Test && build/test/<module_dir>/<Module>Test`.
 
 ### 3. Incremental Loop
 
@@ -96,7 +102,7 @@ After all tests pass, look for [refactor candidates](refactoring.md):
 - [ ] Deepen modules (move complexity behind simple interfaces)
 - [ ] Apply SOLID principles where natural
 - [ ] Consider what new code reveals about existing code
-- [ ] Add or strengthen assertions for assumptions the code now relies on
+- [ ] Make assumptions the code now relies on explicit: a checked, logged refusal at the boundary
 - [ ] Run tests after each refactor step
 
 **Never refactor while RED.** Get to GREEN first.
@@ -109,5 +115,6 @@ After all tests pass, look for [refactor candidates](refactoring.md):
 [ ] Test would survive internal refactor
 [ ] Code is minimal for this test
 [ ] No speculative features added
-[ ] Assertions guard any new preconditions or invariants introduced
+[ ] New preconditions are checked and logged at the boundary, with a test for the refusal
+[ ] No new heap allocation without a nothrow check and a reason (`CLAUDE.md` § Resource Protocol)
 ```

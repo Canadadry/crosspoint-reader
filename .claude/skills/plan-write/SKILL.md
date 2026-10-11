@@ -41,7 +41,9 @@ What the conversation left unresolved. Empty if nothing.
 
 - Every step is small enough to fail fast, and says how it is verified.
 - A step that is entirely a skill's job (`rework-comments` over a directory, …) is written `skill: <name> — <scope>`: plan-pilot calls that skill instead of writing a PRD.
-- English, per `CLAUDE.md`. No "Draft:" line.
+- English, the repository's language. No "Draft:" line.
+- Cite file paths and line numbers for every claim about the code (`CLAUDE.md`: evidence-based reasoning).
+- Verification uses this repository's commands: the host tests (`ctest`, see `git-commit`), the firmware build (`pio run`, see `check-build`), and an owner checklist for what only the device can show.
 
 ## End
 

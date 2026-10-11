@@ -1,39 +1,38 @@
 # When to Use a Test Double
 
-Replace only **system boundaries**:
+Host tests build without the device, so the device's boundaries are the only things replaced:
 
-- Memory: the `allocator_t` a module receives (`tests/heap_allocator.h` backs it with `malloc`)
-- Input: a scripted events file loaded into `p8_input_t`, never a real mouse
-- Output: `p8_graphics_t` and `p8_vram_t`, read back as a framebuffer — never a window
-- The raylib backend: never linked into a unit test
+- **Storage**: SD access goes through `HalStorage` / `HalFile` on the device; logic that reads or writes files takes a small storage interface instead, implemented in memory for tests. The double follows the real card's behaviour, not a friendlier one: a rename does not overwrite (`src/activities/reader/ProgressFile.h:53-56`), names are case-insensitive (FAT), and a write can fail or stop halfway.
+- **Network**: `HttpDownloader` on the device; a fetch callback in tests, returning recorded bytes or a failure.
+- **Display and input**: `GfxRenderer`, `MappedInputManager`. Keep logic out of activities so it doesn't need them.
+- **Time and memory**: `millis()`, `ESP.getFreeHeap()` — pass values in.
 
 Don't replace:
 
 - Your own modules
 - Internal collaborators
-- Anything in `src/game/` or `src/engine/` a test can call for real
-- Randomness: `p8_fixed_rnd` already starts from a fixed seed, so a run is reproducible as is
+- Anything in `lib/` a test can build and call for real (`StreamingJsonParser`, `Utf8`, …)
 
 ## Designing for Test Doubles
 
 **1. Pass the dependency in**
 
-The module receives its allocator, its graphics or its input as a parameter instead of reaching for a global:
+The module receives its storage or its fetch as a parameter instead of reaching for a singleton:
 
-```c
-/* Easy to test: the caller chooses the allocator (real signature) */
-void entity_list_init(entity_list_t *entity_list, const allocator_t *zone);
+```cpp
+// Easy to test: the caller chooses the storage (illustrative)
+bool runSync(const SyncPlan& plan, SyncStorage& storage, FetchFn fetch, void* fetchCtx);
 
-/* Hard to test: hidden dependency on the game's zone */
-void entity_list_init(entity_list_t *entity_list);
+// Hard to test: hidden dependency on the SD card singleton
+bool runSync(const SyncPlan& plan);  // calls Storage.openFileForWrite(...) inside
 ```
 
-The test then passes `&heap_allocator`; the game passes a zone allocator.
+The test passes an in-memory storage; the device passes one backed by `HalStorage`. Callbacks are a function pointer plus a context, not `std::function` (`CLAUDE.md` § Template and `std::function` Bloat).
 
 **2. One narrow function per boundary operation**
 
-An `allocator_t` has `alloc`, `grow` and `release` — not one `do(op, ...)` entry point with a switch. Each double then implements one plain behavior:
+A storage interface has `openRead`, `openWrite`, `rename`, `remove`, `mkdir`, `exists` — not one `do(op, ...)` entry point with a switch. Each double then implements one plain behavior:
 
 - No conditional logic in the test setup
 - Easy to see which operations a test exercises
-- A refusing double (`allocator_grow_refused`) tests the full-zone path in one line
+- A failing double (fail at the N-th write, leave a torn file) tests the crash path in one line

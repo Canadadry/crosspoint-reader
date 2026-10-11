@@ -18,7 +18,7 @@ If an issue you notice is a content issue, not a method issue, do not surface it
 1. The plan file given as argument.
 2. Everything that plan file references — it's expected to cite its own sources inline (design docs, a reference implementation, prior art, etc.); follow those references and read them.
 3. The current state of the actual implementation, if any code exists yet.
-4. Current test results (run the project's test target — e.g. `make test` — if one exists), if applicable.
+4. Current test results: the host tests (`cmake -S test -B build/test -G Ninja && cmake --build build/test && ctest --test-dir build/test --output-on-failure -j`), if applicable. The firmware build (`pio run`) is slow; run it only if the plan's risk depends on it.
 
 Read all four categories unconditionally. Don't skip any of them based on who's calling you or what you assume the plan needs — that judgment call belongs downstream, not here.
 

@@ -18,28 +18,34 @@ Use these scripts (separate calls) instead of ad hoc `git diff` invocations:
 Never `git add .` or `git add -A`.
 
 ### 2. Run the tests
-Code changed → `make test` must be green; red → stop and report, commit nothing. Only `.md` files changed → skip.
+Code changed → the host tests must be green; red → stop and report, commit nothing. Only `.md` files changed → skip.
+
+```
+cmake -S test -B build/test -G Ninja && cmake --build build/test && ctest --test-dir build/test --output-on-failure -j
+```
+
+Then format the changed C++ files with `./bin/clang-format-fix -g`, never `clang-format` directly (`CLAUDE.md`). It only sees tracked files: run `git add -N <new files>` first. If it refuses because clang-format 21 is missing, say so in the proposal; CI's `clang-format` job is then the check.
 
 ### 3. Check new comments
-Every comment on an added line follows `CLAUDE.md` § Comments. One that doesn't → remove it before staging. Never touch unchanged lines.
+Every comment on an added line follows `CLAUDE.md` § Comment Style. One that doesn't → remove it before staging. Never touch unchanged lines.
 
 ### 4. Select files
 Only the files of this unit of work; leave the rest unstaged.
 
 - One commit = one intention. Different concerns → separate commits.
-- Never stage `.env`, secrets, generated binaries, or files unrelated to the task.
+- Never stage `.env`, secrets, generated binaries, or files unrelated to the task. Never stage what `.gitignore` excludes: `.pio/`, `build/`, `*.generated.h`, the generated I18n files (`I18nKeys.h`, `I18nStrings.h`, `I18nStrings.cpp`), `platformio.local.ini`, `compile_commands.json`.
 - Unsure whether a file belongs → leave it out and say so.
 
 ### 5. The gate
 Present the proposal to whoever holds the gate:
 
 ```
-Files: src/game/planet.c, tests/test_planet.c
-Message: fix: keep planet links alive after a slipway is removed
+Files: src/util/OpdsFilename.cpp, test/opds_filename/OpdsFilenameTest.cpp
+Message: fix: keep the extension when a long title is cut
 ```
 
 - `fix-bug` run by the user → the user; wait for the go-ahead.
-- Any unattended caller (`prd-autopilot`, `fix-bug` under `check-e2e` or `plan-pilot`) → the caller accepts or refuses on its own checks; nobody waits.
+- Any unattended caller (`prd-autopilot`, `fix-bug` under `check-build` or `plan-pilot`) → the caller accepts or refuses on its own checks; nobody waits.
 
 ### 6. Commit
 On acceptance: `git add <files>`, then commit with the agreed message. No `Co-Authored-By` trailer.

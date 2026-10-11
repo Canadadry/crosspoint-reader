@@ -3,6 +3,11 @@
 One agent, one module. Replace the `<...>`. The bold passages are the ones that
 were paid for dearly: do not soften them.
 
+In crosspoint-reader, first apply `SKILL.md` § In this repository: `.h` + `.cpp`,
+the bar is `CLAUDE.md` § Comment Style, and **no `assert` is added** — remove
+the passages below about adding `#include <assert.h>` and asserts from the brief
+before pasting it.
+
 ---
 
 You are reworking the comments of **<MODULE>**: `<path/module.h>` and

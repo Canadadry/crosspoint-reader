@@ -1,19 +1,16 @@
 # Good and Bad Tests
 
-Tests live in `tests/test_<module>.c`: `static void` test functions using `assert`, called from `main`. Real APIs below where they exist; other names are illustrative.
+Tests are host gtest suites under `test/<module>/`, one `TEST(Suite, Behavior)` per behavior. Real APIs below where they exist; other names are illustrative.
 
 ## Good Tests
 
 **Integration-style**: test through the module's public header, not its internals.
 
-```c
-/* GOOD: observable behavior, through the public interface */
-static void test_add_component_wise(void) {
-    vec_t a = vec_make(fixed_test_double_from_double(1.0), fixed_test_double_from_double(2.0));
-    vec_t b = vec_make(fixed_test_double_from_double(3.5), fixed_test_double_from_double(-1.0));
-    vec_t result = vec_add(a, b);
-    assert(result.x == fixed_test_double_from_double(4.5));
-    assert(result.y == fixed_test_double_from_double(1.0));
+```cpp
+// GOOD: observable behavior, through the public interface (real API, test/opds_filename/)
+TEST(OpdsFilename, EmptyAuthorCollapsesToTitleForEveryFormat) {
+  EXPECT_EQ(opdsBookFilename("", "My Book", OpdsFilenameFormat::AuthorTitle), "My Book.epub");
+  EXPECT_EQ(opdsBookFilename("", "My Book", OpdsFilenameFormat::TitleOnly), "My Book.epub");
 }
 ```
 
@@ -25,61 +22,66 @@ Characteristics:
 - Name describes WHAT, not HOW
 - One logical assertion per test
 
-For a path only a player reaches (a click, a rendered frame), drive it headless through the same entry point the player hits — input, update, draw — and assert on the framebuffer or the game state, never by calling the inner function directly.
+For a parser or a stream, feed the input the way the device does: in chunks of arbitrary size, byte by byte included, never as one convenient buffer only. For anything that touches storage, run it against the in-memory test double ([mocking.md](mocking.md)) and assert on the resulting files, never on the calls made.
 
 ## Bad Tests
 
 **Implementation-detail tests**: coupled to internal structure.
 
-```c
-/* BAD: reaches into a static helper by including the .c */
-#include "game/trade.c"
-static void test_trade_uses_route_cache(void) {
-    route_cache_fill(&cache, planets, 3);
-    assert(cache.count == 3);
+```cpp
+// BAD: reaches into private state through a test-only friend or #define private public
+TEST(Planner, UsesShaIndex) {
+  SyncPlanner planner;
+  planner.buildIndex(entries);
+  EXPECT_EQ(planner.shaIndex.size(), 3u);
 }
 ```
 
 Red flags:
 
-- Including a `.c` file, or a test-only header exposing statics
+- Including a `.cpp` file, `#define private public`, or a test-only header exposing internals
 - Asserting on call counts or call order
 - Test breaks when refactoring without behavior change
 - Test name describes HOW, not WHAT
 - Verifying through a side channel instead of the interface
-- Replaying a recorded session to reach a state a few calls could build
+- Linking device-only code (HAL, Arduino, ESP-IDF) into a host test instead of passing a narrow interface
 
-## Assertions and Tests: Complementary Layers
+## Checked Contracts and Tests: Complementary Layers
 
-Tests verify behavior from the outside. Assertions enforce contracts from the inside. Both are needed.
+Tests verify behavior from the outside. The code checks its contracts from the inside, and on this firmware a violated contract is refused, not aborted (`CLAUDE.md` § Error Handling Philosophy):
 
-When production code asserts, a failing test tells you not just _that_ something broke but _where_ the contract was violated:
-
-```c
-/* Without assertion: a bad index reads past the table, fails frames later */
-int planet_kind_price(int kind) {
-    return kind_prices[kind];
+```cpp
+// Without a check: a bad record length reads past the buffer, fails far from the cause
+bool readRecord(Stream& in, Record& out) {
+  in.read(out.path, len);
+  ...
 }
 
-/* With assertion: fails at the violated contract */
-int planet_kind_price(int kind) {
-    assert(kind >= 0 && kind < PLANET_KIND_COUNT && "planet kind out of range");
-    return kind_prices[kind];
+// With a check: refused at the violated contract, and the serial log names it
+bool readRecord(Stream& in, Record& out) {
+  if (len >= sizeof(out.path)) {
+    LOG_ERR("SYNC", "Record path too long: %u", len);
+    return false;
+  }
+  ...
 }
 ```
 
-Rule of thumb: if a test setup must respect a constraint to call a function, that constraint is asserted inside the function.
+Rule of thumb: if a caller must respect a constraint to call a function, the function checks it, and a test feeds it the bad input and expects the refusal.
 
-```c
-/* BAD: verifies by poking the registry's storage */
-static void test_spawn_adds_entity(void) {
-    entity_id_t id = planet_spawn(&game, at);
-    assert(game.registry.live.items[game.registry.live.count - 1] == id);
+```cpp
+// BAD: verifies by poking the manifest's storage
+TEST(Manifest, AddStoresEntry) {
+  manifest.add(entry);
+  EXPECT_EQ(manifest.entries_[0].path, "a.epub");
 }
 
-/* GOOD: verifies through the interface */
-static void test_spawned_planet_is_found_by_id(void) {
-    entity_id_t id = planet_spawn(&game, at);
-    assert(planet_by_id(&game, id) != NULL);
+// GOOD: verifies through the interface, after a round trip
+TEST(Manifest, SavedEntryIsFoundAfterReload) {
+  manifest.add(entry);
+  ASSERT_TRUE(manifest.save(storage));
+  Manifest reloaded;
+  ASSERT_TRUE(reloaded.load(storage));
+  EXPECT_TRUE(reloaded.contains("a.epub"));
 }
 ```

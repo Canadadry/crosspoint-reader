@@ -28,7 +28,7 @@ The plan's `Step notes` section (whatever its number) is the progress record: on
 
 ### 2. Run it
 
-**A `skill: <name> — <scope>` step** → invoke that skill in place on the given scope, following its own unattended rules. No PRD. Each of its commits adds its own `- [x]` child (the module, the unit) under the step's item. Then run `check-e2e` and push, as prd-autopilot does after a PRD.
+**A `skill: <name> — <scope>` step** → invoke that skill in place on the given scope, following its own unattended rules. No PRD. Each of its commits adds its own `- [x]` child (the module, the unit) under the step's item. Then run `check-build` and push, as prd-autopilot does after a PRD.
 
 **Any other step:**
 
@@ -38,7 +38,7 @@ The plan's `Step notes` section (whatever its number) is the progress record: on
 **Write the next PRD in parallel.** While step N is being implemented, spawn the PRD agent for step N+1 in the background — it only reads, so it never conflicts with the implementer. Its prompt adds: step N is not done yet; every assumption about N's outcome is an explicit hypothesis labelled `H-<N>-k`; read nothing uncommitted. It writes to `docs/prd/next/`, not `docs/prd/triage/`. When N's note is written, compare the hypotheses with it: all hold → move the PRD to `docs/prd/triage/`; any fails → send the same agent back to update it first. Never start N+1's implementation before N is done.
 
 ### 3. Bugs
-A bug reported by any agent, at any point, that the current step did not set out to fix: invoke `fix-bug` in place on it, unattended — you are the human at its commit gate, with the checks `check-e2e` step 4 lists. It lands as its own `fix:` commit; then resume the step.
+A bug reported by any agent, at any point, that the current step did not set out to fix: invoke `fix-bug` in place on it, unattended — you are the human at its commit gate, with the checks `check-build` step 4 lists. It lands as its own `fix:` commit; then resume the step.
 
 ### 4. Write the step note
 Append `### Step <phase>.<step>` to the `Step notes` section: what was done, what deviated from the plan and why, every scope decision `guideline` made. A few lines, facts only. Consult `plan-review` now if step 6 calls for it, so its accepted changes ride in this commit. Tick the step's item in `progress.md` (and its group's, once all the group's children are `[x]`), commit both (`docs:`) and push. This note is what the next step's PRD and any later resume read.
@@ -52,4 +52,4 @@ After any step that was risky or taught something new, spawn a fresh `plan-revie
 ## Boundaries
 
 - Never change a step's content or scope yourself — only accepted `plan-review` proposals change the plan, and those are method-only.
-- Stop and report to the user only when the plan is complete, or when `prd-autopilot`, `check-e2e` or `fix-bug` stops with a failure.
+- Stop and report to the user only when the plan is complete, or when `prd-autopilot`, `check-build` or `fix-bug` stops with a failure.

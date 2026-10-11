@@ -1,6 +1,6 @@
 ---
 name: fix-bug
-description: Fixes one reported bug end to end — proven cause, failing test, minimal fix, independent check, commit. Also called unattended by check-e2e and plan-pilot.
+description: Fixes one reported bug end to end — proven cause, failing test, minimal fix, independent check, commit. Also called unattended by check-build and plan-pilot.
 ---
 
 # fix-bug
@@ -15,15 +15,15 @@ One invocation = one bug. It is not a loop over a backlog; to chain bugs, invoke
 
 **Called by the user.** No report given → ask for the symptom and how they hit it. Then the run is unattended until stage 4, where `git-commit`'s proposal waits for the user's go-ahead. Those are the only two moments this skill talks to a human.
 
-**Called by `check-e2e` or `plan-pilot`.** Nobody is there. The caller writes the report, and the caller is the human at the commit gate: it checks the fix itself and accepts or refuses.
+**Called by `check-build` or `plan-pilot`.** Nobody is there. The caller writes the report, and the caller is the human at the commit gate: it checks the fix itself and accepts or refuses.
 
 ## Rule #1 — the sub-agents never wait on a human
 
 Any `QUESTION:` from a sub-agent is answered by a fresh `guideline` agent, relayed back — never by pausing for the user.
 
-This bites hardest on stage 1: tell the debug agent that it runs every test itself, headless, so it designs tests it can run rather than tests that need the reporter's screen.
+This bites hardest on stage 1: tell the debug agent that it runs every test itself, on the host, so it designs tests it can run rather than tests that need the reporter's device.
 
-Be honest about what this costs: the bug was very likely observed on the reporter's machine (real window, real OS), while this pipeline proves causes in a headless sandbox. A cause proven here is proven *about the code*, not about their environment. When the debug agent can only reach an environment-dependent hypothesis, that is an `UNPROVEN:` (see stage 1's gate) — not a green light.
+Be honest about what this costs: the bug was very likely observed on the e-reader (ESP32-C3, real SD card, real Wi-Fi, e-ink display), while this pipeline proves causes on a Linux host with no hardware. A cause proven here is proven *about the code*, not about the device. When the debug agent can only reach a device-dependent hypothesis (heap pressure, SD timing, TLS, display refresh), that is an `UNPROVEN:` (see stage 1's gate) — not a green light; the missing observation is usually a serial log from the owner (`python3 scripts/debugging_monitor.py`).
 
 ## Rule #2 — no fix before a proven cause
 
@@ -33,11 +33,11 @@ Stage 2 never starts on a plausible cause. The gate after stage 1 is the whole p
 
 Put these in each sub-agent prompt — a fresh agent knows none of them:
 
-- **Never launch the raylib app interactively** (`CLAUDE.md`). Reproduction is headless: fixed frame count, scripted `events.json`, framebuffer dumped as text.
+- **No hardware.** There is no device, no flashing, no serial port. Reproduction runs on the host: a gtest under `test/`, or a throwaway host program in `tmp/` built against the host-buildable code (`lib/`, pure helpers in `src/util/`). Device-only code (HAL, display, Wi-Fi, activities) is reasoned about from the source and `CLAUDE.md`, never assumed to behave like the host.
 - **Only the orchestrator touches git.** Sub-agents never commit, stage, stash, branch or push.
-- **The suite is `make test`** — prefer the Makefile target over invoking a runner directly.
-- **The C is the reference.** A bug is judged against the established behaviour of the C, as covered by the tests and the e2e replays, and against the port's own conventions, cited from a real site in the tree. `pico8/lua.lua` remains as an archive: consult it to understand an intent, never as the yardstick a fix must match.
-- Throwaway repro programs go in `tmp/`, never in `src/` or `tests/`.
+- **The suite is the host tests**: `cmake -S test -B build/test -G Ninja && cmake --build build/test && ctest --test-dir build/test --output-on-failure -j`. The firmware build is `pio run -e default` (`check-build`).
+- **The project rules are `CLAUDE.md`**: 380 KB RAM ceiling, HAL-only SD access, `makeUniqueNoThrow` instead of bare `new`, `LOG_ERR` + `return false` error handling, `tr()` for UI strings. A fix that breaks one is not a fix.
+- Throwaway repro programs go in `tmp/`, never in `src/`, `lib/` or `test/`.
 
 ## Pipeline
 
@@ -45,7 +45,7 @@ Put these in each sub-agent prompt — a fresh agent knows none of them:
 
 Spawn a fresh, memoryless agent running the `help-me-debug` skill. Hand it the bug report **verbatim** — never your paraphrase, and never your own early theory. A summary is exactly where an unproven hypothesis quietly becomes a premise.
 
-Its mandate: understand and prove, **change nothing** under `src/` or `tests/`. It may build, run, instrument throwaway copies in `tmp/`, and read anything.
+Its mandate: understand and prove, **change nothing** under `src/`, `lib/` or `test/`. It may build, run, instrument throwaway copies in `tmp/`, and read anything.
 
 Reporting contract:
 - `PROVEN:` followed by the bug document from `help-me-debug`'s own template (Summary / Reproduction / Established cause / Scope / Inputs for prioritization / Unverified leads).
@@ -63,11 +63,11 @@ Spawn a fresh, memoryless agent running the `tdd` skill. Hand it the stage-1 bug
 
 Its mandate, in this order:
 
-1. **RED first**: a test that fails *because of this bug*, exercising the real path through the public interface — never one that asserts the shape of the fix. For a path only a human reaches (a real click dispatch, a rendered frame), reproduce it headless through the same entry point the human hits, never by calling the target function directly. The last three bugs of this port all hid precisely in the gap between "a test calls it" and "a human reaches it".
+1. **RED first**: a gtest that fails *because of this bug*, exercising the real path through the public interface — never one that asserts the shape of the fix. Reproduce through the same entry point the device code calls, never by calling an inner helper directly: bugs hide in the gap between "a test calls it" and "the device reaches it". When the bug lives in device-only code that no host test can build, say so in `DONE:` and keep the fix minimal; the commit message records that no host test covers it.
 2. **GREEN**: the minimal fix the proven cause justifies. Nothing adjacent, no cleanup, no refactor of neighbouring code.
-3. `make test` fully green.
+3. The host tests fully green.
 
-It updates `README.md` only if user-visible behaviour changed. It never touches git — stage 4 owns that.
+It updates `USER_GUIDE.md` only if user-visible behaviour changed. It never touches git — stage 4 owns that.
 
 Reporting contract: `DONE:` plus what the test asserts, which files and lines changed, and why that is the minimal fix — or `QUESTION:` (Rule #1). `DONE:` means implemented, **not** verified.
 
@@ -76,8 +76,8 @@ Reporting contract: `DONE:` plus what the test asserts, which files and lines ch
 Spawn a third fresh, memoryless agent. It is not handed the implementer's reasoning as truth; it re-establishes the facts itself:
 
 1. **Prove the new test actually detects the bug**: rebuild a throwaway copy of the pre-fix code under `tmp/` (or revert the fix in a scratch copy) and show the new test failing against it, then passing against the tree. A test that passes both ways proves nothing — this repo already caught two such tests exactly this way.
-2. Run `make test` in full.
-3. Run the sanitizer build if the bug was a memory bug (use-after-free, NULL deref, overflow): 0 ASan/UBSan errors.
+2. Run the host tests in full.
+3. Run the sanitizer build if the bug was a memory bug (use-after-free, null deref, overflow): `cmake -S test -B build/test-asan -G Ninja -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" && cmake --build build/test-asan && ASAN_OPTIONS=alloc_dealloc_mismatch=0 ctest --test-dir build/test-asan --output-on-failure`, 0 ASan/UBSan errors. The `ASAN_OPTIONS` is needed because `test/font_cache_manager/` replaces the global `operator new` with `malloc` to count allocations, which ASan otherwise reports as a mismatch.
 4. Read the diff: it must touch only what the proven cause justifies, and nothing else.
 
 Reporting contract: `VERIFIED:` plus the evidence for each point, or `FAILED:` plus what broke.
@@ -90,7 +90,7 @@ Invoke the `git-commit` skill **yourself, in place** — never in a sub-agent. I
 
 The commit message is where the finding is recorded — no journal file, no prose in the code. Write it in English, strictly factual, from the stage-1 bug document and the stage-3 evidence:
 
-- the symptom as reported, and what surfaced it (human playtest, scripted replay, sanitizer);
+- the symptom as reported, and what surfaced it (owner on the device, serial log, host test, sanitizer, CI);
 - **the hypothesis that was disproved**, when there was one — as valuable as the cause itself, since it's what spares the next reader the same detour;
 - the proven cause, with file/function references;
 - the fix retained, and what was deliberately *not* changed.
@@ -99,7 +99,7 @@ Write it yourself rather than delegating: you hold both the proof and the verifi
 
 What the commit message must NOT absorb, because it belongs in the working tree instead:
 
-- a trap a future reader could reintroduce → an `assert` carrying a message at the exact spot, or, when the invariant isn't checkable at runtime, a comment of at most 40 words there.
+- a trap a future reader could reintroduce → a host test that fails if it comes back, or a short comment at the exact spot (`CLAUDE.md` § Comment Style). On the device, a broken invariant is handled with `LOG_ERR` + `return false`; `assert` only for an impossible state (`CLAUDE.md` § Error Handling Philosophy).
 
 Scope the commit to the code fix and its test (`fix:`). With `progress.md` at the root, `git-commit` folds it into `HEAD` instead (§ `progress.md`): the message above goes into `HEAD`'s body.
 

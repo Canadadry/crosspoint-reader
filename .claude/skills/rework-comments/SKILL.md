@@ -11,6 +11,15 @@ This skill cuts that volume down to what has a reason to live in the code, **wit
 
 A worked example from start to finish (a C port of a PICO-8 cart, 18,544 → 2,966 comment lines, 47% → 12%): [worked-example.md](worked-example.md) — run under the old, looser bar; 12% turned out to still be mostly comments that should not exist. The rest of this file is the method, to apply elsewhere.
 
+## In this repository (crosspoint-reader) — these override the method below
+
+- **The bar is `CLAUDE.md` § Comment Style**: keep only a non-obvious mechanism, a field or parameter meaning, or the reason a special case exists. Headers may therefore keep a one-line field or parameter meaning; `header_residue.sh` is not a gate here.
+- **No asserts added.** On this firmware a broken contract is handled with `LOG_ERR` + `return false`, and `assert` is only for an impossible state (`CLAUDE.md` § Error Handling Philosophy). Adding one changes behaviour on the device. A trap that deserves more than a sentence becomes a host test (a `test:` commit of its own), or stays one sentence.
+- **Files are C++**: `.h` + `.cpp`. The byte check of step 0 uses `g++ -fpreprocessed -dD -E -P -x c++`.
+- **Compile check**: host-buildable modules (`lib/`, pure helpers in `src/util/`) through their gtest suite; everything else through `pio run -e default` once the wave is stable (`check-build`). If `pio` is unavailable here, CI's build job is the check (`check-build` § When the net can't run here).
+- **The test suite** is the host tests: `cmake -S test -B build/test -G Ninja && cmake --build build/test && ctest --test-dir build/test --output-on-failure -j`.
+- Wherever the text below says `make test`, `.c`, `-Werror=comment` or `assert`, read it through these rules.
+
 ## Scope — every file, decided per file
 
 **The scope is every source and test file**, unless the invocation names files. Whether a file needs work is decided by reading it against the bar below, **never by a ratio**, and never by a belief that a directory "was already reworked".
