@@ -11,3 +11,10 @@ constexpr size_t SYNC_GLUE_SHARE_BYTES = 11264;
 
 static_assert(SYNC_GLUE_SHARE_BYTES == SYNC_HEAP_BUDGET_BYTES - SYNC_PLANNER_SHARE_BYTES - SYNC_EXECUTOR_SHARE_BYTES,
               "the glue share is what the planner and executor leave of SYNC_HEAP_BUDGET_BYTES");
+
+// The tree snapshot writer lives only during the tree download, before the planner exists, so it borrows
+// from the planner's share.
+constexpr size_t SYNC_TREE_WRITER_SHARE_BYTES = 2048;
+
+static_assert(SYNC_TREE_WRITER_SHARE_BYTES <= SYNC_PLANNER_SHARE_BYTES,
+              "the tree snapshot writer borrows from the planner's share of SYNC_HEAP_BUDGET_BYTES");

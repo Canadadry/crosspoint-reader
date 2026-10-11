@@ -32,7 +32,7 @@
     - [x] HttpDownloader wiring
   - [ ] Step 2.9 — Sync engine glue
     - [x] Budget constant and pure helpers
-    - [ ] Tree snapshot writer
+    - [x] Tree snapshot writer
     - [ ] Sync run
     - [ ] HalStorage adapter
     - [ ] Sync engine
