@@ -14,6 +14,9 @@
     - [x] Manifest base and journal
     - [x] Compactor and docs
   - [ ] Step 1.5 — Sync planner
+    - [x] Path folding
+    - [ ] Planner core
+    - [ ] Moves and collisions
   - [ ] Step 1.6 — Sync executor
 - [ ] Phase 2 — Device integration
   - [ ] Step 2.7 — Config loader
