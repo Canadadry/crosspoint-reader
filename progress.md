@@ -21,7 +21,7 @@
     - [x] Book cache and bookmark paths
     - [x] Storage interface and in-memory storage
     - [x] Executor core
-    - [ ] Moves and reading-state migration
+    - [x] Moves and reading-state migration
     - [ ] Planner wiring and system tests
 - [ ] Phase 2 — Device integration
   - [ ] Step 2.7 — Config loader

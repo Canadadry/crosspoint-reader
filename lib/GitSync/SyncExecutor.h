@@ -1,5 +1,7 @@
 #pragma once
 
+#include <BookCachePath.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -130,7 +132,14 @@ class SyncExecutor {
   bool loadEntry(RecordReader& reader, uint32_t offset, char* absPath, bool keepEntry);
   SyncOpOutcome run(const SyncOp& op);
   SyncOpOutcome download(uint32_t replaces);
+  SyncOpOutcome land(uint32_t replaces);
   SyncOpOutcome adoptOrDownload();
+  bool matchesTree();
+  SyncOpOutcome move(uint32_t replaces);
+  bool makeParent(char* absPath);
+  SyncOpOutcome migrateState();
+  SyncOpOutcome moveState();
+  bool formatCacheDirs(BookCacheKind kind);
   SyncOpOutcome remove(uint32_t manifestOffset);
   SyncOpOutcome prune(char* absPath);
   SyncOpOutcome skip(SyncSkipReason reason);
@@ -178,6 +187,12 @@ class SyncExecutor {
   uint64_t entrySize = 0;
   char treePath[1 + MAX_SYNC_PATH_BYTES + 1] = {};
   char manifestPath[1 + MAX_SYNC_PATH_BYTES + 1] = {};
+  // The bookmark path is the longest reading-state path; a cache dir is shorter.
+  static constexpr size_t STATE_PATH_CAPACITY =
+      sizeof("/.crosspoint/bookmarks/") - 1 + MAX_SYNC_PATH_BYTES + sizeof(".json");
+  // One reading-state path of the manifest path's book, and the same of the tree path's.
+  char oldStatePath[STATE_PATH_CAPACITY] = {};
+  char newStatePath[STATE_PATH_CAPACITY] = {};
 };
 
 static_assert(sizeof(SyncExecutor) <= 3072, "SyncExecutor exceeds its 3 KiB share of the 64 KB sync heap");

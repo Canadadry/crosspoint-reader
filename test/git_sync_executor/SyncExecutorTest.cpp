@@ -1,3 +1,5 @@
+#include <BookCachePath.h>
+#include <BookmarkUtil.h>
 #include <GitBlobHasher.h>
 #include <Memory.h>
 #include <RecordReader.h>
@@ -123,11 +125,29 @@ SyncOp makeOp(SyncOpKind kind, uint32_t manifestOffset, uint32_t treeOffset) {
   return {kind, SyncSkipReason::None, false, false, manifestOffset, treeOffset};
 }
 
+constexpr BookCacheKind CACHE_KINDS[] = {BookCacheKind::Epub, BookCacheKind::Txt, BookCacheKind::Xtc};
+
+// The reader's own derivations of a book's reading state.
+std::string cacheDir(BookCacheKind kind, const std::string& absPath) {
+  return bookCacheDir("/.crosspoint", kind, absPath);
+}
+std::string bookmarkPath(const std::string& absPath) { return BookmarkUtil::getBookmarkPath(absPath); }
+
+// Every cache dir holds one file named after its book, and the bookmark names it too.
+void seedReadingState(MemorySyncStorage& storage, const std::string& absPath) {
+  for (const BookCacheKind kind : CACHE_KINDS) seedFile(storage, cacheDir(kind, absPath) + "/section.bin", absPath);
+  seedFile(storage, bookmarkPath(absPath), absPath);
+}
+
+SyncOp moveOp(uint32_t manifestOffset, uint32_t treeOffset, bool sourceExists, bool targetExists) {
+  return {SyncOpKind::Move, SyncSkipReason::None, sourceExists, targetExists, manifestOffset, treeOffset};
+}
+
 class SyncExecutorTest : public ::testing::Test {
  protected:
   enum class FetchMode : uint8_t { Serve, WrongBytes, ShortBody, ExtraBytes, FailMidStream };
 
-  SyncExecutorCallbacks callbacks() { return {this, &fetchFake, &hashFake, &clearFake, nullptr, &progressFake}; }
+  SyncExecutorCallbacks callbacks() { return {this, &fetchFake, &hashFake, &clearFake, &movedFake, &progressFake}; }
 
   std::unique_ptr<SyncExecutor> makeExecutor() { return makeUniqueNoThrow<SyncExecutor>(storage, callbacks()); }
 
@@ -194,10 +214,40 @@ class SyncExecutorTest : public ::testing::Test {
     self->progress.push_back({progress.done, progress.total, progress.kind, progress.repoPath});
   }
 
+  // Like the device's clearBookCache: removes, through the card, the cache dir of the kind its extension names.
   static bool clearFake(void* ctx, const char* absPath) {
     auto* self = static_cast<SyncExecutorTest*>(ctx);
     self->cleared.push_back(absPath);
-    return self->clearResult;
+    if (!self->clearResult) return false;
+    const std::string path = absPath;
+    const auto endsWith = [&](const std::string& ext) {
+      return path.size() >= ext.size() && path.compare(path.size() - ext.size(), ext.size(), ext) == 0;
+    };
+    BookCacheKind kind;
+    if (endsWith(".epub")) {
+      kind = BookCacheKind::Epub;
+    } else if (endsWith(".txt")) {
+      kind = BookCacheKind::Txt;
+    } else if (endsWith(".xtc")) {
+      kind = BookCacheKind::Xtc;
+    } else {
+      return true;
+    }
+    const std::string dir = cacheDir(kind, path);
+    if (!self->storage.exists(dir.c_str())) return true;
+    for (const auto& [file, content] : self->storage.snapshot().files) {
+      if (file.compare(0, dir.size() + 1, dir + "/") == 0 && !self->storage.remove(file.c_str())) return false;
+    }
+    return self->storage.rmdir(dir.c_str());
+  }
+
+  // Like RECENT_BOOKS.updatePath and APP_STATE.openEpubPath: idempotent, a no-op for an unknown path.
+  static bool movedFake(void* ctx, const char* oldAbsPath, const char* newAbsPath) {
+    auto* self = static_cast<SyncExecutorTest*>(ctx);
+    self->moves.emplace_back(oldAbsPath, newAbsPath);
+    std::replace(self->recentBooks.begin(), self->recentBooks.end(), std::string(oldAbsPath), std::string(newAbsPath));
+    if (self->openBook == oldAbsPath) self->openBook = newAbsPath;
+    return self->movedResult;
   }
 
   // Prepares an empty card's manifest, or the one already seeded, then writes the tree and begins.
@@ -222,6 +272,10 @@ class SyncExecutorTest : public ::testing::Test {
   std::string unhashable;
   std::vector<uint32_t> treeOffsets;
   std::vector<Progress> progress;
+  std::vector<std::pair<std::string, std::string>> moves;
+  bool movedResult = true;
+  std::vector<std::string> recentBooks;
+  std::string openBook;
 };
 
 }  // namespace
@@ -657,12 +711,15 @@ TEST_F(SyncExecutorTest, PathsOutsideTheSyncedSetAreRefusedUntouched) {
       makeOp(SyncOpKind::Delete, manifestOffsets[0], NO_OFFSET),
       makeOp(SyncOpKind::Delete, manifestOffsets[1], NO_OFFSET),
       makeOp(SyncOpKind::Prune, manifestOffsets[1], NO_OFFSET),
+      moveOp(manifestOffsets[2], treeOffsets[0], true, false),
+      moveOp(manifestOffsets[0], treeOffsets[1], true, false),
   };
   for (const SyncOp& op : ops) EXPECT_EQ(executor->execute(op), SyncOpOutcome::RefusedPath);
   const SyncRunResult result = executor->end();
 
   EXPECT_EQ(result.status, SyncRunStatus::Ok);
-  EXPECT_EQ(result.fileErrors, 6u);
+  EXPECT_EQ(result.fileErrors, 8u);
+  EXPECT_TRUE(moves.empty());
   EXPECT_EQ(storage.mutatingCalls(), 0u);
   EXPECT_EQ(storage.snapshot(), before);
   EXPECT_TRUE(fetches.empty());
@@ -852,6 +909,16 @@ TEST_F(SyncExecutorTest, OperationInterruptedAtAnyCallEndsTheSameWhenRunAgain) {
       {"new nested", {}, {}, {{"A/B/c.epub", "nested"}}, SyncOpKind::Download, false},
       {"adopt mismatch", {}, {{"/d.epub", "local"}}, {{"d.epub", "remote"}}, SyncOpKind::AdoptOrDownload, false},
       {"delete", {{"A/B/x.epub", "X"}}, {{"/A/B/x.epub", "X"}, {"/A/mine.txt", "user"}}, {}, SyncOpKind::Delete, true},
+      {"move",
+       {{"Livres/SF/Dune.epub", "spice"}},
+       {{"/Livres/SF/Dune.epub", "spice"},
+        {cacheDir(BookCacheKind::Epub, "/Livres/SF/Dune.epub") + "/section.bin", "mine"},
+        {cacheDir(BookCacheKind::Txt, "/Livres/SF/Dune.epub") + "/section.bin", "mine"},
+        {bookmarkPath("/Livres/SF/Dune.epub"), "mine"},
+        {cacheDir(BookCacheKind::Epub, "/Lus/Dune.epub") + "/section.bin", "stale"}},
+       {{"Lus/Dune.epub", "spice"}},
+       SyncOpKind::Move,
+       true},
   };
   for (const Scenario& scenario : scenarios) {
     auto seed = [&](MemorySyncStorage& card) {
@@ -916,4 +983,332 @@ TEST_F(SyncExecutorTest, SecondRunOnTheSameExecutorContinuesTheJournal) {
   EXPECT_EQ(executor->end().status, SyncRunStatus::Ok);
 
   EXPECT_EQ(liveEntries(storage).size(), 2u);
+}
+
+TEST_F(SyncExecutorTest, MoveRenamesTheFileWithoutAFetchAndJournalsTheDestination) {
+  std::vector<uint32_t> manifestOffsets;
+  writeRecords(storage, SYNC_MANIFEST_PATH, RecordFileKind::Manifest, {{"Livres/SF/Dune.epub", "spice"}},
+               &manifestOffsets);
+  seedFile(storage, "/Livres/SF/Dune.epub", "spice");
+  auto executor = begin({{"Lus/Dune.epub", "spice"}});
+
+  EXPECT_EQ(executor->execute(moveOp(manifestOffsets[0], treeOffsets[0], true, false)), SyncOpOutcome::Applied);
+  const SyncRunResult result = executor->end();
+
+  EXPECT_EQ(result.status, SyncRunStatus::Ok);
+  EXPECT_EQ(result.moved, 1u);
+  EXPECT_EQ(fileContent(storage, "/Lus/Dune.epub"), "spice");
+  EXPECT_EQ(storage.snapshot().files.count("/Livres/SF/Dune.epub"), 0u);
+  EXPECT_TRUE(fetches.empty());
+  const auto live = liveEntries(storage);
+  ASSERT_EQ(live.size(), 1u);
+  EXPECT_EQ(live.at("Lus/Dune.epub"), (LiveEntry{hex(blobSha("spice").data()), 5}));
+}
+
+TEST_F(SyncExecutorTest, MovedBookKeepsItsCachesAndBookmarksUnderTheReaderDerivedPaths) {
+  for (const auto& [from, to] : {std::pair<std::string, std::string>{"Livres/SF/Dune.epub", "Lus/Dune.epub"},
+                                 std::pair<std::string, std::string>{"Livres/notes.txt", "Livres/Lu/notes.txt"}}) {
+    storage = MemorySyncStorage();
+    const std::string source = "/" + from;
+    const std::string target = "/" + to;
+    std::vector<uint32_t> manifestOffsets;
+    writeRecords(storage, SYNC_MANIFEST_PATH, RecordFileKind::Manifest, {{from, "book"}}, &manifestOffsets);
+    seedFile(storage, source, "book");
+    seedReadingState(storage, source);
+    auto executor = begin({{to, "book"}});
+
+    EXPECT_EQ(executor->execute(moveOp(manifestOffsets[0], treeOffsets[0], true, false)), SyncOpOutcome::Applied);
+    const SyncRunResult result = executor->end();
+
+    EXPECT_EQ(result.stateConflicts, 0u);
+    const auto files = storage.snapshot().files;
+    for (const BookCacheKind kind : CACHE_KINDS) {
+      EXPECT_EQ(fileContent(storage, cacheDir(kind, target) + "/section.bin"), source) << to;
+      EXPECT_FALSE(storage.exists(cacheDir(kind, source).c_str())) << to;
+    }
+    EXPECT_EQ(fileContent(storage, bookmarkPath(target)), source) << to;
+    EXPECT_EQ(files.count(bookmarkPath(source)), 0u) << to;
+  }
+}
+
+TEST_F(SyncExecutorTest, MovedBookFollowsInRecentBooksAndAsTheOpenBook) {
+  std::vector<uint32_t> manifestOffsets;
+  writeRecords(storage, SYNC_MANIFEST_PATH, RecordFileKind::Manifest, {{"Livres/a.epub", "A"}}, &manifestOffsets);
+  seedFile(storage, "/Livres/a.epub", "A");
+  recentBooks = {"/other.epub", "/Livres/a.epub"};
+  openBook = "/Livres/a.epub";
+  auto executor = begin({{"Lus/a.epub", "A"}});
+
+  EXPECT_EQ(executor->execute(moveOp(manifestOffsets[0], treeOffsets[0], true, false)), SyncOpOutcome::Applied);
+  executor->end();
+
+  EXPECT_EQ(moves, (std::vector<std::pair<std::string, std::string>>{{"/Livres/a.epub", "/Lus/a.epub"}}));
+  EXPECT_EQ(recentBooks, (std::vector<std::string>{"/other.epub", "/Lus/a.epub"}));
+  EXPECT_EQ(openBook, "/Lus/a.epub");
+}
+
+TEST_F(SyncExecutorTest, MovePrunesTheSourceFoldersItEmptiedAndKeepsOnesWithUserFiles) {
+  std::vector<uint32_t> manifestOffsets;
+  writeRecords(storage, SYNC_MANIFEST_PATH, RecordFileKind::Manifest,
+               {{"Livres/SF/Dune.epub", "D"}, {"Mes/b.epub", "B"}, {"Mes/c.epub", "C"}}, &manifestOffsets);
+  seedFile(storage, "/Livres/SF/Dune.epub", "D");
+  seedFile(storage, "/Mes/b.epub", "B");
+  seedFile(storage, "/Mes/mine.txt", "user file");
+  seedFile(storage, "/Mes/c.epub", "C");
+  auto executor = begin({{"Lus/Dune.epub", "D"}, {"Lus/b.epub", "B"}, {"Mes/renamed.epub", "C"}});
+
+  for (size_t i = 0; i < 3; ++i) {
+    EXPECT_EQ(executor->execute(moveOp(manifestOffsets[i], treeOffsets[i], true, false)), SyncOpOutcome::Applied);
+  }
+  const SyncRunResult result = executor->end();
+
+  EXPECT_EQ(result.moved, 3u);
+  EXPECT_EQ(result.pruned, 2u);
+  const auto snap = storage.snapshot();
+  EXPECT_EQ(snap.directories.count("/Livres/SF"), 0u);
+  EXPECT_EQ(snap.directories.count("/Livres"), 0u);
+  EXPECT_EQ(fileContent(storage, "/Mes/mine.txt"), "user file");
+  EXPECT_EQ(fileContent(storage, "/Mes/renamed.epub"), "C");
+}
+
+TEST_F(SyncExecutorTest, StaleCacheAtTheDestinationIsClearedThroughTheHookBeforeTheRename) {
+  std::vector<uint32_t> manifestOffsets;
+  writeRecords(storage, SYNC_MANIFEST_PATH, RecordFileKind::Manifest, {{"Livres/Dune.epub", "D"}}, &manifestOffsets);
+  seedFile(storage, "/Livres/Dune.epub", "D");
+  seedFile(storage, cacheDir(BookCacheKind::Epub, "/Livres/Dune.epub") + "/section.bin", "mine");
+  seedFile(storage, cacheDir(BookCacheKind::Epub, "/Lus/Dune.epub") + "/section.bin", "stale");
+  auto executor = begin({{"Lus/Dune.epub", "D"}});
+
+  EXPECT_EQ(executor->execute(moveOp(manifestOffsets[0], treeOffsets[0], true, false)), SyncOpOutcome::Applied);
+  const SyncRunResult result = executor->end();
+
+  EXPECT_EQ(result.stateConflicts, 0u);
+  EXPECT_EQ(cleared, std::vector<std::string>{"/Lus/Dune.epub"});
+  EXPECT_EQ(fileContent(storage, cacheDir(BookCacheKind::Epub, "/Lus/Dune.epub") + "/section.bin"), "mine");
+  EXPECT_FALSE(storage.exists(cacheDir(BookCacheKind::Epub, "/Livres/Dune.epub").c_str()));
+}
+
+TEST_F(SyncExecutorTest, ReadingStateTheDestinationAlreadyHoldsIsLeftAndCountedAsAConflict) {
+  std::vector<uint32_t> manifestOffsets;
+  writeRecords(storage, SYNC_MANIFEST_PATH, RecordFileKind::Manifest, {{"Livres/Dune.epub", "D"}}, &manifestOffsets);
+  seedFile(storage, "/Livres/Dune.epub", "D");
+  seedReadingState(storage, "/Livres/Dune.epub");
+  // The hook clears an .epub's epub_ cache only; the txt_ cache and the bookmark stay.
+  seedFile(storage, cacheDir(BookCacheKind::Txt, "/Lus/Dune.epub") + "/section.bin", "theirs");
+  seedFile(storage, bookmarkPath("/Lus/Dune.epub"), "theirs");
+  auto executor = begin({{"Lus/Dune.epub", "D"}});
+
+  EXPECT_EQ(executor->execute(moveOp(manifestOffsets[0], treeOffsets[0], true, false)), SyncOpOutcome::Applied);
+  const SyncRunResult result = executor->end();
+
+  EXPECT_EQ(result.status, SyncRunStatus::Ok);
+  EXPECT_EQ(result.moved, 1u);
+  EXPECT_EQ(result.stateConflicts, 2u);
+  EXPECT_EQ(fileContent(storage, cacheDir(BookCacheKind::Txt, "/Lus/Dune.epub") + "/section.bin"), "theirs");
+  EXPECT_EQ(fileContent(storage, cacheDir(BookCacheKind::Txt, "/Livres/Dune.epub") + "/section.bin"),
+            "/Livres/Dune.epub");
+  EXPECT_EQ(fileContent(storage, bookmarkPath("/Lus/Dune.epub")), "theirs");
+  EXPECT_EQ(fileContent(storage, bookmarkPath("/Livres/Dune.epub")), "/Livres/Dune.epub");
+  EXPECT_EQ(fileContent(storage, cacheDir(BookCacheKind::Epub, "/Lus/Dune.epub") + "/section.bin"),
+            "/Livres/Dune.epub");
+  EXPECT_EQ(liveEntries(storage).count("Lus/Dune.epub"), 1u);
+}
+
+TEST_F(SyncExecutorTest, MoveBetweenNamesSharingABookmarkLeavesTheBookmarkAlone) {
+  for (const char* to : {"a_b.epub", "A_b.epub"}) {
+    storage = MemorySyncStorage();
+    std::vector<uint32_t> manifestOffsets;
+    writeRecords(storage, SYNC_MANIFEST_PATH, RecordFileKind::Manifest, {{"a/b.epub", "B"}}, &manifestOffsets);
+    seedFile(storage, "/a/b.epub", "B");
+    seedFile(storage, bookmarkPath("/a/b.epub"), "mine");
+    auto executor = begin({{to, "B"}});
+
+    EXPECT_EQ(executor->execute(moveOp(manifestOffsets[0], treeOffsets[0], true, false)), SyncOpOutcome::Applied);
+    const SyncRunResult result = executor->end();
+
+    EXPECT_EQ(result.stateConflicts, 0u) << to;
+    EXPECT_EQ(fileContent(storage, bookmarkPath("/a/b.epub")), "mine") << to;
+    EXPECT_EQ(liveEntries(storage).count(to), 1u) << to;
+  }
+}
+
+TEST_F(SyncExecutorTest, MoveWhoseFileAlreadyMovedIsVerifiedThenMigratesTheReadingState) {
+  std::vector<uint32_t> manifestOffsets;
+  writeRecords(storage, SYNC_MANIFEST_PATH, RecordFileKind::Manifest, {{"Livres/Dune.epub", "spice"}},
+               &manifestOffsets);
+  seedFile(storage, "/Lus/Dune.epub", "spice");
+  seedReadingState(storage, "/Livres/Dune.epub");
+  auto executor = begin({{"Lus/Dune.epub", "spice"}});
+
+  EXPECT_EQ(executor->execute(moveOp(manifestOffsets[0], treeOffsets[0], false, true)), SyncOpOutcome::Applied);
+  const SyncRunResult result = executor->end();
+
+  EXPECT_EQ(result.moved, 1u);
+  EXPECT_EQ(hashed, std::vector<std::string>{"/Lus/Dune.epub"});
+  EXPECT_TRUE(fetches.empty());
+  for (const BookCacheKind kind : CACHE_KINDS) {
+    EXPECT_TRUE(storage.exists(cacheDir(kind, "/Lus/Dune.epub").c_str()));
+  }
+  EXPECT_EQ(fileContent(storage, bookmarkPath("/Lus/Dune.epub")), "/Livres/Dune.epub");
+  EXPECT_EQ(moves, (std::vector<std::pair<std::string, std::string>>{{"/Livres/Dune.epub", "/Lus/Dune.epub"}}));
+  EXPECT_EQ(liveEntries(storage).count("Lus/Dune.epub"), 1u);
+}
+
+TEST_F(SyncExecutorTest, MoveWhoseDestinationDiffersDownloadsItThenMigratesTheReadingState) {
+  std::vector<uint32_t> manifestOffsets;
+  writeRecords(storage, SYNC_MANIFEST_PATH, RecordFileKind::Manifest, {{"Livres/Dune.epub", "spice"}},
+               &manifestOffsets);
+  seedFile(storage, "/Lus/Dune.epub", "SPICE");
+  seedReadingState(storage, "/Livres/Dune.epub");
+  auto executor = begin({{"Lus/Dune.epub", "spice"}});
+
+  EXPECT_EQ(executor->execute(moveOp(manifestOffsets[0], treeOffsets[0], false, true)), SyncOpOutcome::Applied);
+  const SyncRunResult result = executor->end();
+
+  EXPECT_EQ(result.moved, 1u);
+  EXPECT_EQ(result.added, 0u);
+  EXPECT_EQ(fileContent(storage, "/Lus/Dune.epub"), "spice");
+  EXPECT_EQ(fetches[hex(blobSha("spice").data())], 1);
+  EXPECT_EQ(fileContent(storage, cacheDir(BookCacheKind::Epub, "/Lus/Dune.epub") + "/section.bin"),
+            "/Livres/Dune.epub");
+  EXPECT_EQ(fileContent(storage, bookmarkPath("/Lus/Dune.epub")), "/Livres/Dune.epub");
+  EXPECT_EQ(moves.size(), 1u);
+  const auto live = liveEntries(storage);
+  ASSERT_EQ(live.size(), 1u);
+  EXPECT_EQ(live.at("Lus/Dune.epub").shaHex, hex(blobSha("spice").data()));
+}
+
+TEST_F(SyncExecutorTest, MoveThatCannotRenameIsAPerFileErrorWithNothingMigrated) {
+  std::vector<uint32_t> manifestOffsets;
+  writeRecords(storage, SYNC_MANIFEST_PATH, RecordFileKind::Manifest, {{"Livres/a.epub", "A"}}, &manifestOffsets);
+  seedFile(storage, "/Livres/a.epub", "A");
+  seedReadingState(storage, "/Livres/a.epub");
+  seedFile(storage, "/Lus", "a file where a folder should be");
+  auto executor = begin({{"Lus/a.epub", "A"}});
+  const auto before = storage.snapshot();
+
+  EXPECT_EQ(executor->execute(moveOp(manifestOffsets[0], treeOffsets[0], true, false)),
+            SyncOpOutcome::TargetUnwritable);
+  const SyncRunResult result = executor->end();
+
+  EXPECT_EQ(result.status, SyncRunStatus::Ok);
+  EXPECT_EQ(result.fileErrors, 1u);
+  EXPECT_EQ(result.moved, 0u);
+  auto after = storage.snapshot();
+  after.files[SYNC_MANIFEST_PATH] = before.files.at(SYNC_MANIFEST_PATH);
+  EXPECT_EQ(after, before);
+  EXPECT_TRUE(moves.empty());
+  EXPECT_EQ(liveEntries(storage).count("Livres/a.epub"), 1u);
+}
+
+TEST_F(SyncExecutorTest, FailingMoveHookIsFatalAndTheMoveIsNotJournaled) {
+  std::vector<uint32_t> manifestOffsets;
+  writeRecords(storage, SYNC_MANIFEST_PATH, RecordFileKind::Manifest, {{"Livres/a.epub", "A"}}, &manifestOffsets);
+  seedFile(storage, "/Livres/a.epub", "A");
+  auto executor = begin({{"Lus/a.epub", "A"}});
+  movedResult = false;
+
+  EXPECT_EQ(executor->execute(moveOp(manifestOffsets[0], treeOffsets[0], true, false)), SyncOpOutcome::Fatal);
+  const SyncRunResult result = executor->end();
+
+  EXPECT_EQ(result.status, SyncRunStatus::StorageError);
+  EXPECT_EQ(result.moved, 0u);
+  EXPECT_EQ(liveEntries(storage).count("Livres/a.epub"), 1u);
+  EXPECT_TRUE(storage.exists("/Livres")) << "the source folder is pruned only after the hook";
+}
+
+TEST_F(SyncExecutorTest, MoveInterruptedRightAfterItsFileRenameMigratesTheStateOnTheNextRun) {
+  std::vector<uint32_t> manifestOffsets;
+  const auto seed = [&] {
+    storage = MemorySyncStorage();
+    manifestOffsets.clear();
+    writeRecords(storage, SYNC_MANIFEST_PATH, RecordFileKind::Manifest, {{"Livres/SF/Dune.epub", "spice"}},
+                 &manifestOffsets);
+    seedFile(storage, "/Livres/SF/Dune.epub", "spice");
+    seedReadingState(storage, "/Livres/SF/Dune.epub");
+  };
+  seed();
+  auto executor = begin({{"Lus/Dune.epub", "spice"}});
+  storage.resetCounters();
+  ASSERT_EQ(executor->execute(moveOp(manifestOffsets[0], treeOffsets[0], true, false)), SyncOpOutcome::Applied);
+  executor->end();
+  const auto& log = storage.calls();
+  const auto fileRename = std::find(
+      log.begin(), log.end(),
+      MemorySyncStorage::Call{MemorySyncStorage::CallKind::Rename, "/Livres/SF/Dune.epub", "/Lus/Dune.epub", true});
+  ASSERT_NE(fileRename, log.end());
+  const size_t failAt = static_cast<size_t>(fileRename - log.begin()) + 2;
+  moves.clear();
+
+  seed();
+  executor = begin({{"Lus/Dune.epub", "spice"}});
+  storage.resetCounters();
+  storage.failAt(failAt, MemorySyncStorage::Tear::None);
+  EXPECT_EQ(executor->execute(moveOp(manifestOffsets[0], treeOffsets[0], true, false)), SyncOpOutcome::Fatal);
+  executor->end();
+  storage.clearFault();
+
+  EXPECT_EQ(fileContent(storage, "/Lus/Dune.epub"), "spice");
+  EXPECT_TRUE(storage.exists(cacheDir(BookCacheKind::Epub, "/Livres/SF/Dune.epub").c_str()));
+  EXPECT_TRUE(moves.empty());
+
+  executor = begin({{"Lus/Dune.epub", "spice"}});
+  EXPECT_EQ(executor->execute(moveOp(manifestOffsets[0], treeOffsets[0], false, true)), SyncOpOutcome::Applied);
+  EXPECT_EQ(executor->end().status, SyncRunStatus::Ok);
+
+  for (const BookCacheKind kind : CACHE_KINDS) {
+    EXPECT_EQ(fileContent(storage, cacheDir(kind, "/Lus/Dune.epub") + "/section.bin"), "/Livres/SF/Dune.epub");
+    EXPECT_FALSE(storage.exists(cacheDir(kind, "/Livres/SF/Dune.epub").c_str()));
+  }
+  EXPECT_EQ(fileContent(storage, bookmarkPath("/Lus/Dune.epub")), "/Livres/SF/Dune.epub");
+  EXPECT_FALSE(storage.exists("/Livres"));
+  EXPECT_EQ(moves, (std::vector<std::pair<std::string, std::string>>{{"/Livres/SF/Dune.epub", "/Lus/Dune.epub"}}));
+  EXPECT_TRUE(fetches.empty());
+  const auto live = liveEntries(storage);
+  ASSERT_EQ(live.size(), 1u);
+  EXPECT_EQ(live.count("Lus/Dune.epub"), 1u);
+}
+
+TEST_F(SyncExecutorTest, ModifyInterruptedRightAfterItsTargetRenameClearsTheCacheOnTheNextRun) {
+  std::vector<uint32_t> manifestOffsets;
+  const auto seed = [&] {
+    storage = MemorySyncStorage();
+    manifestOffsets.clear();
+    writeRecords(storage, SYNC_MANIFEST_PATH, RecordFileKind::Manifest, {{"a.epub", "old"}}, &manifestOffsets);
+    seedFile(storage, "/a.epub", "old");
+  };
+  seed();
+  auto executor = begin({{"a.epub", "brand new"}});
+  storage.resetCounters();
+  ASSERT_EQ(executor->execute(makeOp(SyncOpKind::Download, manifestOffsets[0], treeOffsets[0])),
+            SyncOpOutcome::Applied);
+  executor->end();
+  const auto& log = storage.calls();
+  const auto targetRename =
+      std::find(log.begin(), log.end(),
+                MemorySyncStorage::Call{MemorySyncStorage::CallKind::Rename, SYNC_DOWNLOAD_TMP_PATH, "/a.epub", true});
+  ASSERT_NE(targetRename, log.end());
+  const size_t failAt = static_cast<size_t>(targetRename - log.begin()) + 2;
+
+  seed();
+  executor = begin({{"a.epub", "brand new"}});
+  storage.resetCounters();
+  storage.failAt(failAt, MemorySyncStorage::Tear::None);
+  EXPECT_EQ(executor->execute(makeOp(SyncOpKind::Download, manifestOffsets[0], treeOffsets[0])), SyncOpOutcome::Fatal);
+  executor->end();
+  storage.clearFault();
+  EXPECT_EQ(fileContent(storage, "/a.epub"), "brand new");
+  // The reader opened the new file through the old cache before the next run.
+  seedFile(storage, cacheDir(BookCacheKind::Epub, "/a.epub") + "/section.bin", "old layout");
+  cleared.clear();
+
+  executor = begin({{"a.epub", "brand new"}});
+  EXPECT_EQ(executor->execute(makeOp(SyncOpKind::Download, manifestOffsets[0], treeOffsets[0])),
+            SyncOpOutcome::Applied);
+  EXPECT_EQ(executor->end().status, SyncRunStatus::Ok);
+
+  EXPECT_EQ(cleared, std::vector<std::string>{"/a.epub"});
+  EXPECT_FALSE(storage.exists(cacheDir(BookCacheKind::Epub, "/a.epub").c_str()));
+  EXPECT_EQ(fileContent(storage, "/a.epub"), "brand new");
+  EXPECT_EQ(liveEntries(storage).at("a.epub").shaHex, hex(blobSha("brand new").data()));
 }

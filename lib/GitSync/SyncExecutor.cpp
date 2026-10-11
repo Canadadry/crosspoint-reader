@@ -1,15 +1,22 @@
 #include "SyncExecutor.h"
 
+#include <BookCachePath.h>
 #include <Logging.h>
 #include <Memory.h>
 
 #include <cstring>
 
+#include "BookmarkPath.h"
 #include "ManifestCompactor.h"
+#include "SyncPathFold.h"
 
 namespace {
 
 constexpr const char* LOG_TAG = "GITEXEC";
+
+// The cache root every reader passes to bookCacheDir.
+constexpr char BOOK_CACHE_ROOT[] = "/.crosspoint";
+constexpr BookCacheKind BOOK_CACHE_KINDS[] = {BookCacheKind::Epub, BookCacheKind::Txt, BookCacheKind::Xtc};
 
 // An empty buffer names no path; any other must be syncable once its leading '/' is dropped.
 bool isSyncable(const char* absPath) { return absPath[0] == '\0' || isSyncablePath(absPath + 1, strlen(absPath + 1)); }
@@ -346,21 +353,108 @@ SyncOpOutcome SyncExecutor::run(const SyncOp& op) {
     case SyncOpKind::Skip:
       return skip(op.reason);
     case SyncOpKind::Move:
-      break;
+      return move(op.manifestOffset);
   }
   return fatal("Unsupported operation for", treePath);
 }
 
+// Moves the manifest path to the tree path, or finishes a move whose file rename already happened.
+// A resumed move verifies the tree path, and downloads it on a mismatch: either way it holds the same book.
+SyncOpOutcome SyncExecutor::move(uint32_t replaces) {
+  if (storage.exists(manifestPath) && !storage.exists(treePath)) {
+    if (!makeParent(treePath) || !storage.rename(manifestPath, treePath)) {
+      return fileError(SyncOpOutcome::TargetUnwritable);
+    }
+  } else if (!matchesTree()) {
+    const SyncOpOutcome landed = land(NO_OFFSET);
+    if (landed != SyncOpOutcome::Applied) return landed;
+  }
+  const SyncOpOutcome migrated = migrateState();
+  if (migrated != SyncOpOutcome::Applied) return migrated;
+  const SyncOpOutcome pruned = prune(manifestPath);
+  if (pruned != SyncOpOutcome::Applied) return pruned;
+  const SyncOpOutcome journaled = journalPut(replaces);
+  if (journaled == SyncOpOutcome::Applied) ++result.moved;
+  return journaled;
+}
+
+// Moves the manifest path's reading state to the tree path; a step already done is skipped.
+// A cache already at the tree path belongs to an earlier book there: the hook clears it once, before any
+// rename, since it may clear more than the kind that revealed it.
+SyncOpOutcome SyncExecutor::migrateState() {
+  for (const BookCacheKind kind : BOOK_CACHE_KINDS) {
+    if (!formatCacheDirs(kind)) return fatal("Cannot derive the cache of", treePath);
+    if (storage.exists(oldStatePath) && storage.exists(newStatePath)) {
+      if (!clearCache(treePath)) return fatal("Cache clear failed", treePath);
+      break;
+    }
+  }
+  for (const BookCacheKind kind : BOOK_CACHE_KINDS) {
+    if (!formatCacheDirs(kind)) return fatal("Cannot derive the cache of", treePath);
+    const SyncOpOutcome moved = moveState();
+    if (moved != SyncOpOutcome::Applied) return moved;
+  }
+  if (!formatBookmarkPath(oldStatePath, sizeof(oldStatePath), manifestPath) ||
+      !formatBookmarkPath(newStatePath, sizeof(newStatePath), treePath)) {
+    return fatal("Cannot derive the bookmark of", treePath);
+  }
+  const SyncOpOutcome moved = moveState();
+  if (moved != SyncOpOutcome::Applied) return moved;
+  if (callbacks.bookMoved && !callbacks.bookMoved(callbacks.ctx, manifestPath, treePath)) {
+    return fatal("Move hook failed for", treePath);
+  }
+  return SyncOpOutcome::Applied;
+}
+
+bool SyncExecutor::formatCacheDirs(BookCacheKind kind) {
+  return formatBookCacheDir(oldStatePath, sizeof(oldStatePath), BOOK_CACHE_ROOT, kind, manifestPath) &&
+         formatBookCacheDir(newStatePath, sizeof(newStatePath), BOOK_CACHE_ROOT, kind, treePath);
+}
+
+// Renames oldStatePath to newStatePath, unless both name the same file on FAT (flattened bookmark names collide),
+// it is gone already, or the destination holds its own state.
+SyncOpOutcome SyncExecutor::moveState() {
+  if (syncPathsEqualFolded(oldStatePath, strlen(oldStatePath), newStatePath, strlen(newStatePath))) {
+    return SyncOpOutcome::Applied;
+  }
+  if (!storage.exists(oldStatePath)) return SyncOpOutcome::Applied;
+  if (storage.exists(newStatePath)) {
+    LOG_INF(LOG_TAG, "Reading state left in place, %s already exists", newStatePath);
+    ++result.stateConflicts;
+    return SyncOpOutcome::Applied;
+  }
+  if (!storage.rename(oldStatePath, newStatePath)) return fatal("Cannot move reading state", oldStatePath);
+  return SyncOpOutcome::Applied;
+}
+
+// Creates absPath's parent directory when missing.
+bool SyncExecutor::makeParent(char* absPath) {
+  char* slash = strrchr(absPath, '/');
+  if (slash == absPath) return true;
+  *slash = '\0';
+  const bool ready = storage.mkdirs(absPath);
+  *slash = '/';
+  return ready;
+}
+
 SyncOpOutcome SyncExecutor::download(uint32_t replaces) {
+  const SyncOpOutcome landed = land(replaces);
+  if (landed != SyncOpOutcome::Applied) return landed;
+  const SyncOpOutcome journaled = journalPut(replaces);
+  if (journaled != SyncOpOutcome::Applied) return journaled;
+  if (replaces == NO_OFFSET) {
+    ++result.added;
+  } else {
+    ++result.updated;
+  }
+  return SyncOpOutcome::Applied;
+}
+
+// Fetches and verifies the tree entry, then puts it in place of whatever is at the tree path.
+SyncOpOutcome SyncExecutor::land(uint32_t replaces) {
   const SyncOpOutcome verified = fetchIntoTemp();
   if (verified != SyncOpOutcome::Applied) return verified;
-  char* slash = strrchr(treePath, '/');
-  if (slash != treePath) {
-    *slash = '\0';
-    const bool parentReady = storage.mkdirs(treePath);
-    *slash = '/';
-    if (!parentReady) return dropTemp(SyncOpOutcome::TargetUnwritable);
-  }
+  if (!makeParent(treePath)) return dropTemp(SyncOpOutcome::TargetUnwritable);
   if (replaces != NO_OFFSET && !clearCache(manifestPath)) return fatal("Cache clear failed", manifestPath);
   if ((replaces == NO_OFFSET || strcmp(manifestPath, treePath) != 0) && !clearCache(treePath)) {
     return fatal("Cache clear failed", treePath);
@@ -371,13 +465,6 @@ SyncOpOutcome SyncExecutor::download(uint32_t replaces) {
     if (!storage.remove(treePath)) return fatal("Cannot remove", treePath);
   }
   if (!storage.rename(SYNC_DOWNLOAD_TMP_PATH, treePath)) return dropTemp(SyncOpOutcome::TargetUnwritable);
-  const SyncOpOutcome journaled = journalPut(replaces);
-  if (journaled != SyncOpOutcome::Applied) return journaled;
-  if (replaces == NO_OFFSET) {
-    ++result.added;
-  } else {
-    ++result.updated;
-  }
   return SyncOpOutcome::Applied;
 }
 
@@ -427,16 +514,18 @@ SyncOpOutcome SyncExecutor::prune(char* absPath) {
 
 // A local file with the tree's size and SHA is journaled as is: no fetch, and its reading state stays.
 SyncOpOutcome SyncExecutor::adoptOrDownload() {
+  if (!matchesTree()) return download(NO_OFFSET);
+  const SyncOpOutcome journaled = journalPut(NO_OFFSET);
+  if (journaled == SyncOpOutcome::Applied) ++result.adopted;
+  return journaled;
+}
+
+// Whether the file at the tree path has the tree entry's size and SHA; a size mismatch skips the hash.
+bool SyncExecutor::matchesTree() {
   uint64_t localSize = 0;
-  if (callbacks.hashFile && storage.fileSize(treePath, localSize) && localSize == entrySize) {
-    uint8_t sha[GitBlobHasher::SHA_SIZE];
-    if (callbacks.hashFile(callbacks.ctx, treePath, entrySize, sha) && memcmp(sha, entrySha, sizeof(sha)) == 0) {
-      const SyncOpOutcome journaled = journalPut(NO_OFFSET);
-      if (journaled == SyncOpOutcome::Applied) ++result.adopted;
-      return journaled;
-    }
-  }
-  return download(NO_OFFSET);
+  if (!callbacks.hashFile || !storage.fileSize(treePath, localSize) || localSize != entrySize) return false;
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  return callbacks.hashFile(callbacks.ctx, treePath, entrySize, sha) && memcmp(sha, entrySha, sizeof(sha)) == 0;
 }
 
 // Streams the tree entry into the download temp, hashing as it goes; Applied once it is verified.
