@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <ostream>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -162,6 +164,12 @@ SyncOp download(uint32_t treeOffset, uint32_t replaced = NO_OFFSET) {
 SyncOp adopt(uint32_t treeOffset) { return op(SyncOpKind::AdoptOrDownload, NO_OFFSET, treeOffset); }
 SyncOp remove(uint32_t manifestOffset) { return op(SyncOpKind::Delete, manifestOffset, NO_OFFSET); }
 SyncOp prune(uint32_t manifestOffset) { return op(SyncOpKind::Prune, manifestOffset, NO_OFFSET); }
+SyncOp skip(uint32_t treeOffset, SyncSkipReason reason) {
+  return SyncOp{SyncOpKind::Skip, reason, false, false, NO_OFFSET, treeOffset};
+}
+SyncOp move(uint32_t manifestOffset, uint32_t treeOffset, bool sourceExists = true, bool targetExists = false) {
+  return SyncOp{SyncOpKind::Move, SyncSkipReason::None, sourceExists, targetExists, manifestOffset, treeOffset};
+}
 
 using Ops = std::vector<SyncOp>;
 
@@ -611,6 +619,297 @@ TEST(SyncPlanner, FailedPlanReportsNoTotal) {
   const PlanRun run = runPlan(manifest, tree);
   EXPECT_EQ(run.result.status, SyncPlanStatus::CapExceeded);
   EXPECT_EQ(run.totals, std::vector<uint32_t>{});
+}
+
+TEST(SyncPlanner, RenameWithinAFolderIsAMoveWithoutPrune) {
+  RecordFile manifest = manifestOf(LIBRARY);
+  RecordFile tree = treeOf({LIBRARY[0], {"Hugo/Notre-Dame de Paris.epub", 2}, LIBRARY[2], LIBRARY[3]});
+  const PlanRun run = runPlan(manifest, tree, {LIBRARY[1].path});
+  EXPECT_EQ(run.result.status, SyncPlanStatus::Ok);
+  EXPECT_EQ(run.ops, Ops{move(manifest.offsets[1], tree.offsets[1])});
+  EXPECT_EQ(run.result.moves, 1u);
+}
+
+TEST(SyncPlanner, MoveAcrossFoldersIsAMoveThenAPruneOfTheSource) {
+  RecordFile manifest = manifestOf(LIBRARY);
+  RecordFile tree = treeOf({LIBRARY[0], {"Classiques/Notre-Dame.epub", 2}, LIBRARY[2], LIBRARY[3]});
+  const PlanRun run = runPlan(manifest, tree, {LIBRARY[1].path});
+  EXPECT_EQ(run.result.status, SyncPlanStatus::Ok);
+  EXPECT_EQ(run.ops, (Ops{move(manifest.offsets[1], tree.offsets[1]), prune(manifest.offsets[1])}));
+  EXPECT_EQ(run.result.moves, 1u);
+  EXPECT_EQ(run.result.prunes, 1u);
+  EXPECT_EQ(run.result.deletes, 0u);
+}
+
+TEST(SyncPlanner, RenameIntoAFolderOnlyDiffersInCaseStaysWithoutPrune) {
+  RecordFile manifest = manifestOf({{"Hugo/a.epub", 5}});
+  RecordFile tree = treeOf({{"HUGO/b.epub", 5}});
+  const PlanRun run = runPlan(manifest, tree, {"Hugo/a.epub"});
+  EXPECT_EQ(run.ops, Ops{move(manifest.offsets[0], tree.offsets[0])});
+}
+
+struct ExistenceCase {
+  std::vector<std::string> card;
+  std::function<Ops(const RecordFile&, const RecordFile&)> expected;
+};
+
+TEST(SyncPlanner, MovePairFollowsTheExistenceTable) {
+  const std::vector<ExistenceCase> cases = {
+      {{"old/a.epub"},
+       [](const RecordFile& m, const RecordFile& t) {
+         return Ops{move(m.offsets[0], t.offsets[0]), prune(m.offsets[0])};
+       }},
+      {{"new/b.epub"},
+       [](const RecordFile& m, const RecordFile& t) {
+         return Ops{move(m.offsets[0], t.offsets[0], false, true), prune(m.offsets[0])};
+       }},
+      {{"old/a.epub", "new/b.epub"},
+       [](const RecordFile& m, const RecordFile& t) {
+         return Ops{adopt(t.offsets[0]), remove(m.offsets[0]), prune(m.offsets[0])};
+       }},
+      {{},
+       [](const RecordFile& m, const RecordFile& t) {
+         return Ops{download(t.offsets[0]), remove(m.offsets[0]), prune(m.offsets[0])};
+       }},
+  };
+  for (const ExistenceCase& c : cases) {
+    RecordFile manifest = manifestOf({{"old/a.epub", 5}});
+    RecordFile tree = treeOf({{"new/b.epub", 5}});
+    const PlanRun run = runPlan(manifest, tree, c.card);
+    EXPECT_EQ(run.result.status, SyncPlanStatus::Ok);
+    EXPECT_EQ(run.ops, c.expected(manifest, tree)) << c.card.size();
+  }
+}
+
+TEST(SyncPlanner, IdenticalFilesMovedTogetherArePairedInByteWiseOrder) {
+  RecordFile manifest = manifestOf({{"old/b.epub", 5}, {"old/B.epub", 5}});
+  RecordFile tree = treeOf({{"new/y.epub", 5}, {"new/x.epub", 5}});
+  const PlanRun run = runPlan(manifest, tree, {"old/b.epub", "old/B.epub"});
+  EXPECT_EQ(run.result.status, SyncPlanStatus::Ok);
+  // "old/B.epub" < "old/b.epub" and "new/x.epub" < "new/y.epub".
+  EXPECT_EQ(run.ops, (Ops{move(manifest.offsets[0], tree.offsets[0]), move(manifest.offsets[1], tree.offsets[1]),
+                          prune(manifest.offsets[0]), prune(manifest.offsets[1])}));
+}
+
+TEST(SyncPlanner, ExtraMissingIdenticalFileIsDeleted) {
+  RecordFile manifest = manifestOf({{"old/b.epub", 5}, {"old/a.epub", 5}});
+  RecordFile tree = treeOf({{"new/x.epub", 5}});
+  const PlanRun run = runPlan(manifest, tree, {"old/b.epub", "old/a.epub"});
+  EXPECT_EQ(run.result.status, SyncPlanStatus::Ok);
+  EXPECT_EQ(run.ops, (Ops{move(manifest.offsets[1], tree.offsets[0]), remove(manifest.offsets[0]),
+                          prune(manifest.offsets[0]), prune(manifest.offsets[1])}));
+}
+
+TEST(SyncPlanner, ExtraNewIdenticalFileIsHandledAsNew) {
+  RecordFile manifest = manifestOf({{"a.epub", 5}});
+  RecordFile tree = treeOf({{"d.epub", 5}, {"c.epub", 5}});
+  const PlanRun run = runPlan(manifest, tree, {"a.epub"});
+  EXPECT_EQ(run.ops, (Ops{move(manifest.offsets[0], tree.offsets[1]), download(tree.offsets[0])}));
+}
+
+TEST(SyncPlanner, SamePrefixWithAnotherShaIsNeverAMove) {
+  RecordFile manifest = manifestOf({{"a.epub", 5}, {"b.epub", 6}});
+  RecordFile tree = treeOf({{"c.epub", 5, 1}, {"d.epub", 6, 1}, {"e.epub", 6}});
+  const PlanRun run = runPlan(manifest, tree, {"a.epub", "b.epub"});
+  EXPECT_EQ(run.ops, (Ops{move(manifest.offsets[1], tree.offsets[2]), download(tree.offsets[0]),
+                          download(tree.offsets[1]), remove(manifest.offsets[0])}));
+}
+
+TEST(SyncPlanner, RemoteCaseCollisionKeepsTheByteWiseSmallestPath) {
+  RecordFile manifest = manifestOf({});
+  RecordFile tree = treeOf({{"book.epub", 1}, {"Book.epub", 2}});
+  const PlanRun run = runPlan(manifest, tree);
+  EXPECT_EQ(run.result.status, SyncPlanStatus::Ok);
+  EXPECT_EQ(run.ops, (Ops{download(tree.offsets[1]), skip(tree.offsets[0], SyncSkipReason::CaseCollision)}));
+  EXPECT_EQ(run.result.caseCollisionSkips, 1u);
+}
+
+TEST(SyncPlanner, CaseCollisionRerunOnlySkipsAgain) {
+  RecordFile manifest = manifestOf({{"Book.epub", 2}});
+  RecordFile tree = treeOf({{"book.epub", 1}, {"Book.epub", 2}});
+  const PlanRun run = runPlan(manifest, tree, {"Book.epub"});
+  EXPECT_EQ(run.result.status, SyncPlanStatus::Ok);
+  EXPECT_EQ(run.ops, Ops{skip(tree.offsets[0], SyncSkipReason::CaseCollision)});
+}
+
+TEST(SyncPlanner, CaseCollisionKeepsThePathAlreadyInTheManifest) {
+  RecordFile manifest = manifestOf({{"book.epub", 1}});
+  RecordFile tree = treeOf({{"book.epub", 1}, {"Book.epub", 2}});
+  PlanRun run = runPlan(manifest, tree, {"book.epub"});
+  EXPECT_EQ(run.ops, Ops{skip(tree.offsets[1], SyncSkipReason::CaseCollision)});
+
+  RecordFile modified = treeOf({{"book.epub", 3}, {"Book.epub", 2}});
+  run = runPlan(manifest, modified, {"book.epub"});
+  EXPECT_EQ(run.ops, (Ops{download(modified.offsets[0], manifest.offsets[0]),
+                          skip(modified.offsets[1], SyncSkipReason::CaseCollision)}));
+}
+
+TEST(SyncPlanner, CaseCollisionWithAnotherCaseInTheManifestReplacesIt) {
+  RecordFile manifest = manifestOf({{"BOOK.epub", 1}});
+  RecordFile tree = treeOf({{"book.epub", 1}, {"Book.epub", 2}});
+  PlanRun run = runPlan(manifest, tree, {"BOOK.epub"});
+  EXPECT_EQ(run.ops, (Ops{download(tree.offsets[1], manifest.offsets[0]),
+                          skip(tree.offsets[0], SyncSkipReason::CaseCollision)}));
+
+  RecordFile sameContent = treeOf({{"book.epub", 1}, {"Book.epub", 1}});
+  run = runPlan(manifest, sameContent, {"BOOK.epub"});
+  EXPECT_EQ(run.ops, Ops{skip(sameContent.offsets[0], SyncSkipReason::CaseCollision)});
+}
+
+TEST(SyncPlanner, ThreeWayCaseCollisionKeepsOneWinner) {
+  RecordFile manifest = manifestOf({});
+  RecordFile tree = treeOf({{"a/BOOK.epub", 1}, {"a/book.epub", 2}, {"A/Book.epub", 3}, {"a/other.epub", 4}});
+  const PlanRun run = runPlan(manifest, tree);
+  EXPECT_EQ(run.ops, (Ops{download(tree.offsets[2]), download(tree.offsets[3]),
+                          skip(tree.offsets[0], SyncSkipReason::CaseCollision),
+                          skip(tree.offsets[1], SyncSkipReason::CaseCollision)}));
+}
+
+TEST(SyncPlanner, FatUnsafeNamesAreSkippedAndTheRestIsPlanned) {
+  for (const char forbidden : {':', '*', '?', '"', '<', '>', '|', '\\'}) {
+    RecordFile manifest = manifestOf(LIBRARY);
+    RecordFile tree =
+        treeOf(with(with(LIBRARY, {std::string("Bad/a") + forbidden + "b.epub", 90}), {"Zola/Nana.epub", 91}));
+    const PlanRun run = runPlan(manifest, tree);
+    EXPECT_EQ(run.result.status, SyncPlanStatus::Ok);
+    EXPECT_EQ(run.ops, (Ops{download(tree.offsets[5]), skip(tree.offsets[4], SyncSkipReason::UnsafeName)}))
+        << forbidden;
+    EXPECT_EQ(run.result.unsafeNameSkips, 1u);
+    EXPECT_EQ(run.result.treeEntries, 6u);
+  }
+}
+
+TEST(SyncPlanner, SkipsComeLastInTreeOrder) {
+  RecordFile manifest = manifestOf({});
+  RecordFile tree = treeOf({{"x?.epub", 1}, {"book.epub", 2}, {"Book.epub", 3}, {"y|.epub", 4}});
+  const PlanRun run = runPlan(manifest, tree);
+  EXPECT_EQ(run.ops, (Ops{download(tree.offsets[2]), skip(tree.offsets[0], SyncSkipReason::UnsafeName),
+                          skip(tree.offsets[1], SyncSkipReason::CaseCollision),
+                          skip(tree.offsets[3], SyncSkipReason::UnsafeName)}));
+}
+
+TEST(SyncPlanner, SwappedNamesAreTwoDownloadsReplacingTheirOwnEntries) {
+  RecordFile manifest = manifestOf({{"a/x.epub", 1}, {"b/y.epub", 2}});
+  RecordFile tree = treeOf({{"b/y.epub", 1}, {"a/x.epub", 2}});
+  const PlanRun run = runPlan(manifest, tree, {"a/x.epub", "b/y.epub"});
+  EXPECT_EQ(run.result.status, SyncPlanStatus::Ok);
+  EXPECT_EQ(run.ops,
+            (Ops{download(tree.offsets[0], manifest.offsets[1]), download(tree.offsets[1], manifest.offsets[0])}));
+  EXPECT_EQ(run.result.moves, 0u);
+}
+
+// Every kind of operation, identical files moved together included.
+struct EveryKindScenario {
+  RecordFile manifest = manifestOf({{"z/moved.epub", 1},
+                                    {"keep.epub", 2},
+                                    {"b/twin.epub", 3},
+                                    {"a/twin.epub", 3},
+                                    {"mod.epub", 4},
+                                    {"gone/x.epub", 5},
+                                    {"c/renamed.epub", 6}});
+  RecordFile tree = treeOf({{"Odd?.epub", 10},
+                            {"keep.epub", 2},
+                            {"y/twin.epub", 3},
+                            {"x/twin.epub", 3},
+                            {"mod.epub", 11},
+                            {"new.epub", 12},
+                            {"adopt.epub", 13},
+                            {"KEEP.epub", 14},
+                            {"m/moved.epub", 1},
+                            {"c/renamed2.epub", 6}});
+  std::vector<std::string> card = {"z/moved.epub", "keep.epub",   "b/twin.epub",    "a/twin.epub",
+                                   "mod.epub",     "gone/x.epub", "c/renamed.epub", "adopt.epub"};
+};
+
+TEST(SyncPlanner, EveryKindComesInTheDocumentedOrder) {
+  EveryKindScenario s;
+  const PlanRun run = runPlan(s.manifest, s.tree, s.card);
+  const auto& m = s.manifest.offsets;
+  const auto& t = s.tree.offsets;
+  EXPECT_EQ(run.result.status, SyncPlanStatus::Ok);
+  EXPECT_EQ(run.ops,
+            (Ops{move(m[0], t[8]), move(m[2], t[2]), move(m[3], t[3]), move(m[6], t[9]), adopt(t[6]),
+                 download(t[4], m[4]), download(t[5]), remove(m[5]), prune(m[0]), prune(m[2]), prune(m[3]), prune(m[5]),
+                 skip(t[0], SyncSkipReason::UnsafeName), skip(t[7], SyncSkipReason::CaseCollision)}));
+}
+
+TEST(SyncPlanner, SourceFailingAtAnyCallWhileMovingStopsThePlanBeforeAnyOperation) {
+  for (const bool failManifest : {true, false}) {
+    size_t failAt = 1;
+    for (;; ++failAt) {
+      EveryKindScenario scenario;
+      FaultySource manifestSource(scenario.manifest, failManifest ? failAt : 0);
+      FaultySource treeSource(scenario.tree, failManifest ? 0 : failAt);
+      Card card{scenario.card};
+      const PlanRun run = runPlan(manifestSource, treeSource, card);
+      if (run.result.status == SyncPlanStatus::Ok) {
+        EXPECT_EQ(run.ops.size(), 14u);
+        break;
+      }
+      EXPECT_EQ(run.result.status, failManifest ? SyncPlanStatus::ManifestError : SyncPlanStatus::TreeError) << failAt;
+      EXPECT_EQ(run.result.readerStatus, RecordStatus::IoError) << failAt;
+      EXPECT_EQ(run.ops, Ops{}) << failAt;
+    }
+    EXPECT_GT(failAt, 20u);
+  }
+}
+
+// Operations by path rather than offset, sorted: the same plan whatever the order of entries in the files.
+std::vector<std::string> describe(const std::vector<Entry>& manifestEntries, const RecordFile& manifest,
+                                  const std::vector<Entry>& treeEntries, const RecordFile& tree, const Ops& ops) {
+  const auto pathAt = [](const std::vector<Entry>& entries, const RecordFile& file, uint32_t offset) {
+    const auto it = std::find(file.offsets.begin(), file.offsets.end(), offset);
+    return it == file.offsets.end() ? std::string("-") : entries[it - file.offsets.begin()].path;
+  };
+  std::vector<std::string> lines;
+  lines.reserve(ops.size());
+  for (const SyncOp& o : ops) {
+    lines.push_back(std::to_string(static_cast<int>(o.kind)) + " " +
+                    pathAt(manifestEntries, manifest, o.manifestOffset) + " > " +
+                    pathAt(treeEntries, tree, o.treeOffset) + " " + std::to_string(static_cast<int>(o.reason)) +
+                    std::to_string(o.sourceExists) + std::to_string(o.targetExists));
+  }
+  std::sort(lines.begin(), lines.end());
+  return lines;
+}
+
+TEST(SyncPlanner, ShuffledInputsGiveTheSamePlan) {
+  std::vector<Entry> manifestEntries = {{"old/d.epub", 7}, {"old/a.epub", 7}, {"old/c.epub", 7}, {"old/b.epub", 7},
+                                        {"Book.epub", 8},  {"keep.epub", 9},  {"gone.epub", 10}, {"p/x.epub", 11, 1}};
+  std::vector<Entry> treeEntries = {{"new/z.epub", 7}, {"new/y.epub", 7}, {"new/x.epub", 7}, {"book.epub", 8},
+                                    {"BOOK.epub", 12}, {"keep.epub", 9},  {"q/x.epub", 11},  {"bad|.epub", 13}};
+  const std::vector<std::string> card = {"old/d.epub", "old/a.epub", "old/c.epub", "old/b.epub",
+                                         "Book.epub",  "keep.epub",  "gone.epub",  "p/x.epub"};
+  RecordFile manifest = manifestOf(manifestEntries);
+  RecordFile tree = treeOf(treeEntries);
+  const PlanRun reference = runPlan(manifest, tree, card);
+  ASSERT_EQ(reference.result.status, SyncPlanStatus::Ok);
+  EXPECT_EQ(reference.result.moves, 3u);
+  const std::vector<std::string> expected = describe(manifestEntries, manifest, treeEntries, tree, reference.ops);
+  std::mt19937 random(42);
+  for (int round = 0; round < 20; ++round) {
+    std::shuffle(manifestEntries.begin(), manifestEntries.end(), random);
+    std::shuffle(treeEntries.begin(), treeEntries.end(), random);
+    RecordFile shuffledManifest = manifestOf(manifestEntries);
+    RecordFile shuffledTree = treeOf(treeEntries);
+    const PlanRun run = runPlan(shuffledManifest, shuffledTree, card);
+    EXPECT_EQ(describe(manifestEntries, shuffledManifest, treeEntries, shuffledTree, run.ops), expected) << round;
+  }
+}
+
+TEST(SyncPlanner, EveryFileMovedAtTheCapIsPlannedAsMoves) {
+  const std::vector<Entry> old = numbered(MAX_SYNC_FILES, "old", 1000);
+  std::vector<std::string> card;
+  card.reserve(old.size());
+  for (const Entry& entry : old) card.push_back(entry.path);
+  RecordFile manifest = manifestOf(old);
+  RecordFile tree = treeOf(numbered(MAX_SYNC_FILES, "new", 1000));
+  SyncPlanResult result;
+  EXPECT_LE(seeksFor(manifest, tree, card, result), 5 * MAX_SYNC_FILES + SEEK_SLACK);
+  EXPECT_EQ(result.status, SyncPlanStatus::Ok);
+  EXPECT_EQ(result.moves, MAX_SYNC_FILES);
+  EXPECT_EQ(result.prunes, MAX_SYNC_FILES);
+  EXPECT_EQ(result.downloads + result.deletes, 0u);
 }
 
 }  // namespace

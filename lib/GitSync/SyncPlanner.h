@@ -86,12 +86,20 @@ class SyncPlanner {
   bool streamTree(RecordSource& source, SyncPlanResult& result);
   bool findUnchanged(const Slot& remote, const SyncRecord& entry, bool& unchanged, SyncPlanResult& result);
   bool matchPaths(SyncPlanResult& result);
-  bool matchRemote(Slot& remote, size_t runBegin, size_t runEnd, SyncPlanResult& result);
+  bool hasNewRemote(size_t begin, size_t end) const;
+  bool resolveClass(size_t begin, size_t end, SyncPlanResult& result);
+  bool findWinner(size_t begin, size_t end, const Slot* stored, Slot*& winner, bool& sameSha, SyncPlanResult& result);
   bool checkLocal(SyncLocalExistsFn localExists, void* existsCtx, SyncPlanResult& result);
+  bool pairMoves(SyncLocalExistsFn localExists, void* existsCtx, SyncPlanResult& result);
+  bool hasBothSides(size_t begin, size_t end) const;
+  bool pairGroup(size_t begin, size_t end, SyncLocalExistsFn localExists, void* existsCtx, SyncPlanResult& result);
+  bool sortByPath(Slot* first, Slot* last, SyncPlanResult& result);
+  bool pairMove(Slot& source, Slot& target, SyncLocalExistsFn localExists, void* existsCtx, SyncPlanResult& result);
   void countOps(SyncPlanResult& result);
   bool emit(const SyncOpSink& sink);
   bool readManifestAt(uint32_t offset, SyncRecord& record, SyncPlanResult& result);
   bool readTreeAt(uint32_t offset, SyncRecord& record, SyncPlanResult& result);
+  bool readSlot(const Slot& slot, SyncRecord& record, SyncPlanResult& result);
 
   Slot slots[SLOT_CAPACITY];
   size_t manifestSlots = 0;
