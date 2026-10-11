@@ -29,18 +29,21 @@ class GitTreeParser {
   GitTreeParser& operator=(const GitTreeParser&) = delete;
 
   void reset();
-  // Ignores every byte after an error or once the top-level object has closed.
+  // Ignores every byte after an error, an abort, or once the top-level object has closed.
   void feed(const char* data, size_t len);
 
-  // Top-level object closed, valid tree `sha`, `tree` array closed, boolean `truncated`, no error.
+  // Top-level object closed, valid tree `sha`, `tree` array closed, boolean `truncated`, no error, not aborted.
   bool isComplete() const;
   bool isTruncated() const { return truncated; }
   bool hasError() const;
+  bool wasAborted() const { return aborted; }
   // Meaningful only when isComplete().
   const uint8_t* treeSha() const { return sha; }
 
  private:
-  enum class PendingKey : uint8_t { None, Sha, Tree, Truncated };
+  enum class PendingKey : uint8_t { None, Sha, Tree, Truncated, EntryPath, EntryType, EntrySha, EntrySize };
+  // Ignored: `tree` (directory) and `commit` (submodule). Invalid: missing, not a string, or unknown.
+  enum class EntryType : uint8_t { Invalid, Blob, Ignored };
 
   static void sOnKey(void* ctx, const char* key, size_t len);
   static void sOnString(void* ctx, const char* value, size_t len);
@@ -52,15 +55,22 @@ class GitTreeParser {
   static void sOnArrayStart(void* ctx);
   static void sOnArrayEnd(void* ctx);
 
-  bool stopped() const { return error || rootClosed; }
+  bool stopped() const { return error || aborted || rootClosed; }
+  bool atTreeElement() const { return inTreeArray && depth == 2; }
+  bool inEntry() const { return inTreeArray && depth == 3; }
   // Returns the key the value belongs to and clears it, so a value is never attributed twice.
   PendingKey takePendingKey();
+  // A wrong-typed value fails a top-level key or a `tree` element; on an entry key it leaves the field unread.
+  void rejectValue(PendingKey key);
   void onKey(const char* key, size_t len);
   void onString(const char* value, size_t len);
-  void onScalar();
+  void onNumber(const char* value, size_t len);
   void onBool(bool value);
+  void onScalar();
   void onContainerStart(bool isArray);
   void onContainerEnd();
+  void beginEntry();
+  void endEntry();
 
   StreamingJsonParser json;
   void* recordCtx;
@@ -76,5 +86,17 @@ class GitTreeParser {
   bool truncated;
   bool rootClosed;
   bool error;
+  bool aborted;
   uint8_t sha[GitBlobHasher::SHA_SIZE];
+
+  // Fields of the entry being read, acted on at its object end.
+  EntryType entryType;
+  bool entryPathRead;
+  bool entryShaRead;
+  bool entrySizeRead;
+  size_t entryPathLen;
+  uint64_t entrySize;
+  uint8_t entrySha[GitBlobHasher::SHA_SIZE];
+  // Sized like the JSON token buffer, so every path it delivers fits with its terminator.
+  char entryPath[StreamingJsonParser::TOKEN_BUF_SIZE];
 };

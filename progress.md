@@ -7,7 +7,7 @@
     - [x] Path filter with verdicts
   - [ ] Step 1.3 — Trees response parser
     - [x] Top-level shape
-    - [ ] Blob records
+    - [x] Blob records
     - [ ] Skips
   - [ ] Step 1.4 — Manifest and tree record format
   - [ ] Step 1.5 — Sync planner
