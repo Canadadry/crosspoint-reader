@@ -242,6 +242,52 @@ bool SyncExecutor::begin() {
   return true;
 }
 
+SyncRunResult SyncExecutor::apply(SyncPlanner& planner) {
+  if (!begin()) return result;
+  const SyncPlanResult planned = planner.plan(*manifestFile, *treeFile, &localExists, this, sink());
+  SyncRunResult run = end();
+  if (run.status != SyncRunStatus::Ok) return run;
+  run.recordStatus = planned.readerStatus;
+  switch (planned.status) {
+    case SyncPlanStatus::Ok:
+    case SyncPlanStatus::Aborted:
+      break;
+    case SyncPlanStatus::ManifestError:
+    case SyncPlanStatus::TreeError:
+      LOG_ERR(LOG_TAG, "Plan failed: status %u, reader %u", static_cast<unsigned>(planned.status),
+              static_cast<unsigned>(planned.readerStatus));
+      if (planned.readerStatus == RecordStatus::IoError) {
+        run.status = SyncRunStatus::StorageError;
+      } else {
+        run.status =
+            planned.status == SyncPlanStatus::TreeError ? SyncRunStatus::TreeError : SyncRunStatus::ManifestError;
+      }
+      break;
+    case SyncPlanStatus::ManifestNotCompacted:
+      LOG_ERR(LOG_TAG, "Plan refused an uncompacted manifest");
+      run.status = SyncRunStatus::ManifestError;
+      break;
+    case SyncPlanStatus::CapExceeded:
+      LOG_ERR(LOG_TAG, "Over the cap: %u manifest and %u tree entries", static_cast<unsigned>(planned.manifestEntries),
+              static_cast<unsigned>(planned.treeEntries));
+      run.status = SyncRunStatus::CapExceeded;
+      run.manifestEntries = planned.manifestEntries;
+      run.treeEntries = planned.treeEntries;
+      break;
+  }
+  return run;
+}
+
+// Called by the planner before its first operation, so the tree path buffer is still free.
+bool SyncExecutor::localExists(void* ctx, const char* path, size_t pathLen) {
+  auto* self = static_cast<SyncExecutor*>(ctx);
+  if (pathLen > MAX_SYNC_PATH_BYTES) return false;
+  self->treePath[0] = '/';
+  memcpy(self->treePath + 1, path, pathLen);
+  self->treePath[1 + pathLen] = '\0';
+  return self->storage.exists(self->treePath);
+}
+
 SyncRunResult SyncExecutor::end() {
   if (manifestFile) {
     // A failed run may have torn the journal: only prepare() can tell where it resumes.

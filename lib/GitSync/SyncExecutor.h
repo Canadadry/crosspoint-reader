@@ -113,6 +113,10 @@ class SyncExecutor {
   // and compacts the manifest's journal. Call before the planner exists.
   SyncRunResult prepare();
 
+  // begin(), the planner's plan over the manifest and tree.tmp through sink(), then end(). Call after a
+  // successful prepare(), once tree.tmp is written.
+  SyncRunResult apply(SyncPlanner& planner);
+
   // Opens the manifest and the tree for operations; false with the reason in end()'s result.
   bool begin();
   // The sink apply() hands the planner: onTotal records the total, onOp checks the cancel flag,
@@ -158,6 +162,7 @@ class SyncExecutor {
   SyncRunStatus compactManifest();
   bool writeEmptyManifest();
 
+  static bool localExists(void* ctx, const char* path, size_t pathLen);
   static bool sinkOp(void* ctx, const SyncOp& op);
   static void sinkTotal(void* ctx, uint32_t totalOps);
   static bool sinkWrite(void* ctx, const uint8_t* data, size_t len);

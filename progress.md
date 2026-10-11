@@ -22,7 +22,7 @@
     - [x] Storage interface and in-memory storage
     - [x] Executor core
     - [x] Moves and reading-state migration
-    - [ ] Planner wiring and system tests
+    - [x] Planner wiring and system tests
 - [ ] Phase 2 — Device integration
   - [ ] Step 2.7 — Config loader
   - [ ] Step 2.8 — HTTP additions
