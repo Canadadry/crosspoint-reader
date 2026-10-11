@@ -23,7 +23,7 @@
     - [x] Executor core
     - [x] Moves and reading-state migration
     - [x] Planner wiring and system tests
-- [ ] Phase 2 — Device integration
+- [x] Phase 2 — Device integration
   - [x] Step 2.7 — Config loader
     - [x] Config parser
     - [x] Device loader
@@ -39,7 +39,7 @@
   - [x] Step 2.10 — GitSyncActivity
     - [x] Activity shell and strings
     - [x] Sync run, progress and summary
-  - [ ] Step 2.11 — Home menu entry
+  - [x] Step 2.11 — Home menu entry
     - [x] HomeMenu index module
     - [x] Update entry
 - [ ] Phase 3 — Documentation and hand-off

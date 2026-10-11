@@ -696,3 +696,31 @@ Done 2026-10-11 by the owner, with curl from macOS and a fine-grained token sent
   cosmetic point is left as is: in landscape the theme centres the progress percentage
   on the screen, not on the bar.
 - Build net green (RAM 17.1%, flash 82.7%). No device test. No `guideline` decisions.
+
+### Step 2.11
+
+- `src/activities/home/HomeMenu.h`: the `HomeMenuItem` enum (with `GIT_SYNC`) and one
+  `constexpr` row table with visibility gates. `itemCount`, `menuItemToIndex` and
+  `indexToMenuItem` all derive from it. `HomeActivity` builds its count, cursor, labels,
+  icons and actions from it, replacing the hand-written OPDS index arithmetic. Host-tested
+  over every {OPDS, Update} combination (`test/home_menu/`, 7 cases).
+- Order: Browse Files, Recent Books, [OPDS], [Update Library], File Transfer, Settings.
+  `git_sync_config::exists()` is called once per Home `onEnter`. Label
+  `STR_GIT_SYNC_MENU` ("Update Library" / "Mettre à jour les livres"). Icon: a new
+  `UIIcon::Sync`, which Lyra draws with the Lucide download bitmap. Leaving the sync
+  screen puts the cursor back on the entry.
+- Index review: render, action, count and the cursor on entry agree for {OPDS yes/no} ×
+  {Update yes/no} × {no recent books / some}, RoundedRaff's Continue Reading row
+  included.
+- `guideline` decision: with OPDS servers and a valid sync config on a button device,
+  the menu has six rows and Settings runs into the button hints (Classic 10 px, label
+  readable; Lyra 3 Covers 36 px, label partly hidden). Accepted as a known limitation for
+  the owner's checklist; fixing it means changing the themes' shared row layout.
+- Bug found while writing the step 3.12 PRD and fixed with `fix-bug` (its own `fix:`
+  commit): the File Transfer web server checked only the last path segment, so
+  `/download?path=/.crosspoint/github-sync.json` served the token to anyone on the
+  network. Delete, rename, move, mkdir, both uploads and `/api/files` had the same gap.
+  `isProtectedStoragePath` (`src/util/ProtectedPath`) now checks every segment for all
+  eight entry points and for WebDAV. The new host test fails on the old rule. WebDAV
+  PROPFIND may still list `/.crosspoint`: an unproven lead, left unchanged.
+- Build net green.
