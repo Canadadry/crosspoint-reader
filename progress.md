@@ -9,7 +9,7 @@
     - [x] Top-level shape
     - [x] Blob records
     - [x] Skips
-  - [ ] Step 1.4 — Manifest and tree record format
+  - [x] Step 1.4 — Manifest and tree record format
     - [x] Tree files: CRC, streams, writer, reader
     - [x] Manifest base and journal
     - [x] Compactor and docs

@@ -472,3 +472,26 @@ Done 2026-10-11 by the owner, with curl from macOS and a fine-grained token sent
   over-long cases use separate small bodies so the fixture stays a real tree.
 - First GitSync module to log: host tests use a no-op `stubs/Logging.h`.
 - Build net green. No `guideline` decisions.
+
+### Step 1.4
+
+- One format for `tree.tmp` and the manifest (`lib/GitSync/RecordFormat.h`, documented in
+  `docs/file-formats.md`, `RECORD_FILE_VERSION = 1`): an 8-byte header, then CRC-32 frames
+  (entry `sha, size, replaces, path`; drop `target`; seal `count`). A record's offset is
+  its frame's position; `RecordReader::readEntryAt(offset)` reads it back, CRC-checked.
+- A tree is entries plus one seal; an unsealed file reads `Truncated`.
+- The manifest is a sealed base plus an append-only journal: a modify or move is one
+  entry frame with `replaces`, and a delete is one drop frame. Persisting one operation
+  appends 39 + path bytes (entry) or 11 bytes (drop), so a run's writes stay linear.
+- A frame cut off at the end of the journal is a torn tail: it reads `End` with
+  `tornTail()`, and `endOffset()` gives where to resume. Flipped kind or length bytes
+  read `Corrupt`, which is the stricter choice; a crash only ever leaves a prefix.
+- `ManifestCompactor` folds the journal into a new sealed base in two passes over a
+  caller-supplied `uint32_t` array (4 B per frame target). Step 6 runs it at sync start,
+  into a temp file, then remove and rename.
+- Streams: `RecordSource` (`read`, `seek`) and `RecordSink` (`write`), with
+  `MemoryRecordStream` for tests. Sizes: reader 320 B, writer 320 B, compactor 640 B,
+  held as members or through `makeUniqueNoThrow`. Nothing logs or allocates.
+- Tests: `test/git_sync_record_format/` (61 cases), covering truncation and a source
+  error at every byte, bit flips, and the grammar rules. Build net green.
+- No `guideline` decisions.
