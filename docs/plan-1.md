@@ -33,7 +33,7 @@ The goals behind every rule below:
   blob download returns the real file.
 - **Authentication**: a fine-grained GitHub token scoped to that one repository, with
   *Contents: Read* only. `HttpDownloader` already sends preemptive Basic auth
-  (`src/network/HttpDownloader.cpp:161-166`), and GitHub accepts the token as the password
+  (`src/network/HttpDownloader.cpp:84-88`, in `runGetWolf`), and GitHub accepts the token as the password
   of Basic auth.
 - **Configuration file**: `/.crosspoint/github-sync.json`, written by the owner from a PC.
   There is no on-device editing and no keyboard entry of the token.
@@ -92,8 +92,11 @@ The goals behind every rule below:
   versions. `HttpDownloader` cannot set an `Accept` header today, so one optional header
   parameter must be added. The response must answer 200 without a redirect. If GitHub
   redirects to another host, the sync stops with an error rather than resend the token
-  there: `HttpDownloader` follows redirects with the same headers
-  (`src/network/HttpDownloader.cpp:178-189`).
+  there: `HttpDownloader` re-adds the `Authorization` header on every redirect hop
+  (`src/network/HttpDownloader.cpp:72-114`). Every firmware build defines
+  `FREEINK_NET_WOLFSSL=1` (`platformio.ini:41`), so the compiled path is `runGetWolf`
+  (`HttpDownloader.cpp:66-128`); the `esp_http_client` path (`131-237`) is dead code in
+  these builds.
 - **Truncated tree**: if the trees response carries `"truncated": true` (more than 100,000
   entries or more than 7 MB), the sync aborts with an error message and changes nothing.
 - **Streaming, not buffering**:
@@ -169,7 +172,21 @@ The goals behind every rule below:
 - **Firmware build**: `pio run` (the `default` environment).
 - **Formatting**: `./bin/clang-format-fix -g`.
 - **On-device checks**: hardware tests are not available to the agent; they are listed
-  for the owner in step 11.
+  for the owner in step 12.
+
+### Phase 0 — De-risk the GitHub API
+
+0. **Owner check of the API from a PC, before step 3.** With the real token, the owner runs:
+   - `curl -i -u x:<token> "https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"`;
+   - `curl -i -u x:<token> -H "Accept: application/vnd.github.raw+json" https://api.github.com/repos/{owner}/{repo}/git/blobs/{sha}`,
+     on one real file.
+
+   Record in section 6, for each call, the status, whether it redirects (and where), and
+   whether the blob body is the raw file. If either call redirects or fails, settle the
+   fallback of section 5 in the plan before step 3, including where the commit SHA comes
+   from.
+   *Verified by*: the recorded results in section 6. Unattended runs stop here until they
+   exist.
 
 ### Phase 1 — Pure logic in `lib/GitSync/`, host-tested
 
@@ -185,23 +202,30 @@ The goals behind every rule below:
 3. **Trees response parser.** It is fed chunks of the GitHub trees JSON and emits a
    `(path, type, sha, size)` record per `"blob"` entry through a plain function-pointer
    callback, and reports `truncated` and the tree's own `sha`. Built on `StreamingJsonParser`.
+   A blob entry whose path overflowed the parser's token buffer is skipped and logged,
+   never emitted: `StreamingJsonParser` silently drops a string of 512 bytes or more
+   (`lib/JsonParser/StreamingJsonParser.cpp:226-240`).
    *Verified by*: gtest with a recorded fixture fed byte by byte and in random chunk sizes,
-   checking that `tree` and `commit` entries are skipped and that `truncated: true` is
-   detected.
-4. **Manifest format.**
+   checking that `tree` and `commit` entries are skipped, that `truncated: true` is
+   detected, and that an over-long path is skipped without corrupting the next entry.
+4. **Manifest and tree record format.**
    - **Records**: a versioned record file of `(sha[20], size, path)`, with read and write
      over a small stream interface so that tests use memory and the device uses `HalFile`.
+   - **Both files**: the same format serves the manifest and the streamed tree
+     (`tree.tmp`), including reading a path back from a record offset, which is how the
+     planner refers to entries.
    - **Layout**: aligned reads only (`memcpy`), per the RISC-V rule in `CLAUDE.md`.
    - **Corruption**: a corrupt or wrong-version file is reported, never half-applied.
 
-   *Verified by*: gtest covering the round trip, truncation at every byte offset, and a
-   version mismatch.
+   *Verified by*: gtest covering the round trip, offset read-back, truncation at every
+   byte offset, and a version mismatch.
 5. **Sync planner.**
    - **Inputs**: the manifest entries, the filtered remote entries, and a callback
-     `localBlobSha(path) → optional sha`, used only for adoption.
+     `localExists(path)`. The planner never hashes: hashing is an executor operation.
    - **Output**: an ordered operation list:
      1. moves (rename plus cache migration);
-     2. adopts (manifest only);
+     2. adopt-or-download (a remote path not in the manifest that exists locally: the
+        executor hashes it, then adopts it or downloads it);
      3. downloads (new or changed);
      4. deletes (in the manifest, gone remotely);
      5. prunes (empty directories that held synced files).
@@ -217,54 +241,117 @@ The goals behind every rule below:
    - a rename within a folder, and a move across folders;
    - a swap of two files' names;
    - two missing paths with the same SHA;
-   - adoption with a matching local file, and a local file with a different SHA, which is
-     downloaded;
+   - a remote path not in the manifest that exists locally yields adopt-or-download;
    - a remote `.crosspoint/…` entry, which is ignored;
+   - a rename that only changes case, and a remote tree with two paths differing only by
+     case: the chosen outcome (success, per-file error or skip) is pinned by the test, and
+     an error never blocks the rest of the sync, never repeats on every run and never
+     deletes the file;
    - a cap overflow, which is refused.
+
+6. **Sync executor**, in `lib/GitSync/` behind a small storage interface (memory in tests,
+   `HalStorage` on the device). It runs a plan from step 5:
+   - each download is hashed with the step 1 incremental blob hash as it is written to a
+     temp file; a size or SHA mismatch with the tree entry deletes the temp file, reports a
+     per-file error and leaves the manifest unchanged;
+   - each verified download is renamed onto its target; when it replaces a
+     changed path, that book's cache is cleared (through an injected hook) before the
+     manifest is persisted;
+   - parent directories are created as needed;
+   - adopt-or-download hashes the local file through an injected hash callback, then
+     records it in the manifest if the SHA matches, or downloads it otherwise;
+   - the manifest is persisted after each operation;
+   - deletes and prunes are applied;
+   - a move renames the file, then migrates the reading state before the manifest is
+     persisted:
+     - the cache directory and bookmark file are renamed through the storage interface,
+       for epub, txt and xtc;
+     - recent books and app state are updated through one injected hook;
+   - a cancel flag is honoured between operations.
+
+   Downloads go through an injected fetch callback, so no network is needed in tests. A
+   size-0 remote entry is written as an empty file without fetching:
+   `HttpDownloader::downloadToFile` treats an empty body as an error
+   (`src/network/HttpDownloader.cpp:309-313`).
+   The in-memory storage's rename fails when the destination exists, like SdFat's
+   (`src/activities/reader/ProgressFile.h:53-56`), so every overwrite, the manifest's own
+   save included, is a remove then a rename, and the fault injection covers that window.
+   It also follows FAT naming: path lookup ignores case, and names with FAT-forbidden
+   characters (`: * ? " < > | \`) are rejected.
+   *Verified by*: gtest showing that:
+   - with in-memory storage that fails at its N-th mutating call (write, rename, remove,
+     mkdir, manifest persist), where a failing write leaves a partial prefix of its bytes
+     (a torn file), stopping at every N and running again ends with the same
+     files and manifest as an uninterrupted run, including a plan of adopt-or-download
+     operations where a rerun does not re-hash files already adopted;
+   - an adopt-or-download plan at the documented file-count cap: the in-memory storage
+     counts the bytes written, and the total is recorded in the step notes next to the RAM
+     cap, so that a manifest rewrite cost growing with the square of the file count is
+     caught here;
+   - a file outside the manifest and anything under `.crosspoint/` are never touched;
+   - a fetch returning wrong or truncated bytes leaves no file at the target and no
+     manifest entry, and a rerun fetches it again;
+   - a failed download leaves no partial file at the target;
+   - a run interrupted between a move's file rename and its migration still migrates the
+     reading state on the next run, and the same holds for a modify and its cache clear;
+   - the expected migration paths come from the reader's own code, applied to the
+     absolute SD path (`BookmarkUtil::getBookmarkPath`, the epub, txt and xtc cache-path
+     derivation), either linked into the test or pinned as vectors those functions
+     produce, never re-derived by the test author;
+   - an end-to-end chain, from a recorded trees fixture through the step 3 parser, the
+     tree record stream, the planner and the executor, on in-memory storage, ends with the
+     expected files and manifest; the fixture includes a size-0 file.
 
 ### Phase 2 — Device integration
 
-6. **Config loader.** `/.crosspoint/github-sync.json` is parsed into
+7. **Config loader.** `/.crosspoint/github-sync.json` is parsed into
    `{owner, repo, branch, token}`, with validation (non-empty fields, branch defaulting to
    `main`). It exposes `exists()` for the home menu. The token is never logged.
    *Verified by*: gtest on the parsing function with valid, missing-field and malformed
    inputs, plus `pio run`.
-7. **HTTP additions.** `HttpDownloader` gains:
+8. **HTTP additions.** `HttpDownloader` gains:
    - an optional extra request header for the `Accept` value;
    - a "no cross-host redirect when credentials are set" guard.
 
-   Existing callers are unchanged.
-   *Verified by*: `pio run`, and review that OPDS, OTA and KOReader call sites compile
-   unchanged.
-8. **Sync engine** (`src/network/GitSync*.cpp` or `src/util/`). It:
-   - deletes leftover temporary files;
-   - streams the tree to `/.crosspoint/gitsync/tree.tmp`;
-   - aborts on `truncated`;
-   - plans with the hash callback reading the local file through `HalStorage` in 4 KB
-     chunks;
-   - executes operations one by one, writing each download to a temp file that is renamed
-     onto the target, creating parent directories with `Storage.mkdir`;
-   - migrates the reading state on moves (cache dir, bookmark file, recent books,
-     `APP_STATE.openEpubPath`), following `EpubReaderActivity.cpp:127-146`;
-   - persists the manifest after each operation;
-   - honours a cancel flag between operations;
-   - reports progress through a function-pointer-plus-context callback.
+   Both land on the compiled `runGetWolf` path, and on the `esp_http_client` path too if
+   it is kept. Existing callers are unchanged.
+   *Verified by*: `pio run`; a review naming the `#if` branch each change lands in; and a
+   review that OPDS, OTA and KOReader call sites compile unchanged.
+9. **Sync engine glue** (`src/network/GitSync*.cpp` or `src/util/`). It wires the step 6
+   executor to the device:
+   - the `HalStorage` implementation of its storage interface;
+   - deleting leftover temporary files;
+   - streaming the tree to `/.crosspoint/gitsync/tree.tmp`, and aborting on `truncated`;
+   - the hash callback used by adopt-or-download, reading the local file through
+     `HalStorage` in 4 KB chunks;
+   - the fetch callback over `HttpDownloader`;
+   - a review that the `HalStorage` implementation keeps the storage interface's contract
+     (rename never overwrites, case-insensitive lookup, FAT-forbidden names rejected);
+   - the device side of the move hook (`RECENT_BOOKS.updatePath`,
+     `APP_STATE.openEpubPath`), following `EpubReaderActivity.cpp:127-146`, with paths in
+     the same absolute form the reader stores;
+   - the device side of the modify hook (`clearBookCache`);
+   - progress reporting through a function-pointer-plus-context callback.
 
    *Verified by*: `pio run` and a code review against the rules in section 2.
-9. **`GitSyncActivity`.** It handles the Wi-Fi connect flow, the progress screen, Back as
+10. **`GitSyncActivity`.** It handles the Wi-Fi connect flow, the progress screen, Back as
    cancel, the summary or error screen, and `preventAutoSleep() == true`. Its tr() strings
-   go in `english.yaml` and `french.yaml`, and the work runs in a task with a 4096-byte
-   stack (network work, per `CLAUDE.md`) deleted in `onExit()`.
+   go in `english.yaml` and `french.yaml`. The sync runs in the context that already runs
+   wolfSSL downloads on this device: the activity loop, as OPDS does
+   (`OpdsBookBrowserActivity.cpp:483-520`) and OTA does (`src/network/OtaUpdater.cpp`),
+   with input pumped from the progress callback so Back can cancel. If a dedicated task is
+   used instead, its stack is sized from that context, not from the generic 4096-byte rule,
+   and it is deleted in `onExit()`.
    *Verified by*: `pio run`, `./bin/clang-format-fix -g`, and a review of orientation
    handling in all four modes.
-10. **Home menu entry.** **Update** is shown only when the config exists, with its own icon
+11. **Home menu entry.** **Update** is shown only when the config exists, with its own icon
     and index mapping updated in `menuItemToIndex` / `indexToMenuItem`.
     *Verified by*: `pio run`, and a review that the menu index math still holds with and
     without OPDS servers and recent books.
 
 ### Phase 3 — Documentation and hand-off
 
-11. **User guide.** Add a section to `USER_GUIDE.md` covering:
+12. **User guide.** Add a section to `USER_GUIDE.md` covering:
     - creating the fine-grained token (one repository, Contents: Read);
     - writing `/.crosspoint/github-sync.json`;
     - the first sync from a PC (copy the files, do not clone onto the card or delete
@@ -277,6 +364,11 @@ The goals behind every rule below:
     - a delete with its folder pruned;
     - moving the book currently being read keeps its progress and bookmarks;
     - Back mid-sync, then Update again, resumes;
+    - Back during the first sync's adoption, then Update again, resumes without re-hashing
+      the files already adopted;
+    - the duration of the first sync, recorded with the library's file count;
+    - the stack high-water mark of the sync's context (`uxTaskGetStackHighWaterMark`),
+      logged after a run that includes a TLS fetch, with at least 1 KB left;
     - Wi-Fi drops mid-download and the next run recovers;
     - free heap stays at or above 50 KB during a sync (`LOG_DBG` `ESP.getFreeHeap()`).
 
@@ -301,6 +393,13 @@ The goals behind every rule below:
   with Basic auth. If it redirects, fall back to
   `GET /repos/{owner}/{repo}/contents/{path}?ref={commit}` with the same header, and keep
   the no-cross-host-redirect guard.
+- **TLS without certificate verification (owner to rule).** The compiled HTTP path calls
+  `http.setInsecure()` (`src/network/HttpDownloader.cpp:75`), so the token would go out
+  over TLS without server certificate verification. On a hostile network, a
+  man-in-the-middle could capture a token with read access to the private repository.
+  Before step 8, the owner decides whether to accept this, or whether step 8 must enable
+  verification for `api.github.com` (which needs CA support in `freeink::SecureHttpClient`,
+  not checked here: `freeink-sdk/` is empty in this checkout).
 - **The copied skills assume another build.** The skills copied from slipways-love
   (`git-commit`, `fix-bug`, `tdd`, `check-e2e`, `prd-autopilot`) run `make test` and
   `make e2e`, which do not exist here. Until they are adapted, use the verification
