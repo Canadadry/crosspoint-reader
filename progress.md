@@ -20,7 +20,7 @@
   - [ ] Step 1.6 — Sync executor
     - [x] Book cache and bookmark paths
     - [x] Storage interface and in-memory storage
-    - [ ] Executor core
+    - [x] Executor core
     - [ ] Moves and reading-state migration
     - [ ] Planner wiring and system tests
 - [ ] Phase 2 — Device integration
