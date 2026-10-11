@@ -21,6 +21,15 @@ class HttpDownloader {
     HTTP_ERROR,
     FILE_ERROR,
     ABORTED,
+    REDIRECT_REFUSED,
+  };
+
+  struct RequestOptions {
+    // Extra request header sent on every hop when both are non-empty; must outlive the call.
+    const char* headerName = nullptr;
+    const char* headerValue = nullptr;
+    // With credentials set, refuse a redirect to another origin (scheme, host or port).
+    bool refuseCrossOriginRedirect = false;
   };
 
   /**
@@ -37,6 +46,13 @@ class HttpDownloader {
    */
   static bool fetchUrl(const std::string& url, const DataCallback& onData, const std::string& username = "",
                        const std::string& password = "");
+
+  /**
+   * Stream a 200 response body to onData as it arrives. Returns REDIRECT_REFUSED when the
+   * cross-origin guard stops a redirect.
+   */
+  static DownloadError fetchStream(const std::string& url, const DataCallback& onData, const std::string& username,
+                                   const std::string& password, const RequestOptions& options);
 
   /**
    * Download a file to the SD card with optional credentials.
