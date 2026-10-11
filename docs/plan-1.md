@@ -44,8 +44,13 @@ The goals behind every rule below:
     its previous CA, so a CA rotation does not break the sync.
   - An optional `/.crosspoint/github-ca.pem` overrides the bundle, so the owner can follow
     a rotation without a firmware update.
-  - The certificate's host name must be `api.github.com` (see section 5: this needs an SDK
-    change).
+  - The certificate's host name must be `api.github.com`. `freeink::SecureClient` never
+    checks it today (`freeink-sdk/libs/network/SecureNet/src/SecureClient.cpp:87-103`: CA
+    loaded, no `wolfSSL_check_domain_name`), so any certificate chaining to the pinned CA
+    would pass. The check goes into the owner's fork of the SDK (owner decision,
+    2026-10-11): `Canadadry/freeink-sdk`, forked from `Free-Ink/freeink-sdk`. The
+    `freeink-sdk` submodule URL in `.gitmodules` points to the fork, and the submodule is
+    bumped to the commit carrying the check. No upstream pull request is part of this plan.
   - A verification failure aborts the sync with a clear message, and changes nothing on the
     card.
   - Other features (OPDS, OTA, KOReader) keep their current behaviour: out of scope here.
@@ -329,7 +334,12 @@ in `.claude/skills/` use (`git-commit`, `tdd`, `check-build`):
 
    - certificate verification for the sync's requests: `setCACert` with the pinned roots
      instead of `setInsecure()`, opt-in per call so OPDS, OTA and KOReader keep their
-     current behaviour.
+     current behaviour;
+   - the host name check: in the fork `Canadadry/freeink-sdk`, `SecureClient` calls
+     `wolfSSL_check_domain_name(ssl, host)` when it verifies, with the result of
+     `wolfSSL_CTX_load_verify_buffer` checked and logged; then `.gitmodules` points to the
+     fork and the submodule is bumped. If the fork does not exist yet or this session cannot
+     push to it, the step stops here and asks the owner to create it.
 
    Both land on the compiled `runGetWolf` path, and on the `esp_http_client` path too if
    it is kept. Existing callers are unchanged.
@@ -416,14 +426,6 @@ in `.claude/skills/` use (`git-commit`, `tdd`, `check-build`):
   with Basic auth. If it redirects, fall back to
   `GET /repos/{owner}/{repo}/contents/{path}?ref={commit}` with the same header, and keep
   the no-cross-host-redirect guard.
-- **Hostname check needs an SDK change.** `freeink::SecureClient` loads the pinned CA
-  (`wolfSSL_CTX_load_verify_buffer`, `freeink-sdk/libs/network/SecureNet/src/SecureClient.cpp:87-89`)
-  but never calls `wolfSSL_check_domain_name`, so any certificate chaining to that CA passes,
-  whatever its host name. The SDK is the `freeink-sdk` git submodule (upstream
-  `Free-Ink/freeink-sdk`), not this repository. Before step 8, the owner decides how the
-  check lands: an upstream SDK pull request with the submodule bumped, or a fork of the
-  submodule. Until then step 8 stops after the CA pinning, and says so in its note.
-
 ## 6. Step notes
 
 ### Step 0.0
