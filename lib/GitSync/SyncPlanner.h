@@ -7,10 +7,11 @@
 #include "RecordFormat.h"
 #include "RecordReader.h"
 #include "RecordStream.h"
+#include "SyncBudget.h"
 
 // Largest library the planner accepts, counted in syncable entries per file (manifest and tree each).
 // The worst case, every file moved, takes one 12-byte slot per side: 24 B per file, 48,000 B at 2,000.
-// The 51,200 B budget asserted below fits about 2,091; raising this means re-checking the 64 KB sync heap.
+// SYNC_PLANNER_SHARE_BYTES fits about 2,091; raising this means re-checking SYNC_HEAP_BUDGET_BYTES.
 constexpr size_t MAX_SYNC_FILES = 2000;
 
 // Emitted in this order: Move, AdoptOrDownload, Download, Delete, Prune, Skip.
@@ -112,4 +113,5 @@ class SyncPlanner {
   uint8_t scratchSha[GitBlobHasher::SHA_SIZE];
 };
 
-static_assert(sizeof(SyncPlanner) <= 51200, "SyncPlanner exceeds its 50 KiB share of the 64 KB sync heap");
+static_assert(sizeof(SyncPlanner) <= SYNC_PLANNER_SHARE_BYTES,
+              "SyncPlanner exceeds its share of SYNC_HEAP_BUDGET_BYTES");

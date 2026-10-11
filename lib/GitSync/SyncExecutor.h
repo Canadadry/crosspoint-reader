@@ -10,6 +10,7 @@
 #include "RecordFormat.h"
 #include "RecordReader.h"
 #include "RecordWriter.h"
+#include "SyncBudget.h"
 #include "SyncPath.h"
 #include "SyncPlanner.h"
 #include "SyncStorage.h"
@@ -200,4 +201,5 @@ class SyncExecutor {
   char newStatePath[STATE_PATH_CAPACITY] = {};
 };
 
-static_assert(sizeof(SyncExecutor) <= 3072, "SyncExecutor exceeds its 3 KiB share of the 64 KB sync heap");
+static_assert(sizeof(SyncExecutor) <= SYNC_EXECUTOR_SHARE_BYTES,
+              "SyncExecutor exceeds its share of SYNC_HEAP_BUDGET_BYTES");

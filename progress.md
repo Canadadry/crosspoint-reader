@@ -31,6 +31,11 @@
     - [x] URL origin helper
     - [x] HttpDownloader wiring
   - [ ] Step 2.9 — Sync engine glue
+    - [x] Budget constant and pure helpers
+    - [ ] Tree snapshot writer
+    - [ ] Sync run
+    - [ ] HalStorage adapter
+    - [ ] Sync engine
   - [ ] Step 2.10 — GitSyncActivity
   - [ ] Step 2.11 — Home menu entry
 - [ ] Phase 3 — Documentation and hand-off

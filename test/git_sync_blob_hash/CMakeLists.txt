@@ -1,6 +1,7 @@
 add_executable(GitBlobHasherTest
   GitBlobHasherTest.cpp
   ${REPO_ROOT}/lib/GitSync/GitBlobHasher.cpp
+  ${REPO_ROOT}/lib/GitSync/GitBlobSourceHash.cpp
 )
 
 target_include_directories(GitBlobHasherTest PRIVATE

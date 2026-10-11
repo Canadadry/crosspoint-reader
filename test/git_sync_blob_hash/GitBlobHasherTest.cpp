@@ -8,6 +8,8 @@
 #include <vector>
 
 #include "GitBlobHasher.h"
+#include "GitBlobSourceHash.h"
+#include "MemoryRecordStream.h"
 
 namespace {
 
@@ -231,4 +233,92 @@ TEST(ShaHex, ReadsOnlyGivenLengthOfUnterminatedBuffer) {
   char hex[SHA_HEX_LENGTH + 1];
   shaToHex(sha, hex);
   EXPECT_STREQ(hex, "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+}
+
+TEST(GitBlobSourceHash, FileReadThroughSourceMatchesGit) {
+  uint8_t content[] = {'h', 'e', 'l', 'l', 'o', '\n'};
+  MemoryRecordStream source(content, sizeof(content), sizeof(content));
+  uint8_t buffer[4096];
+  GitBlobHasher hasher;
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  ASSERT_TRUE(hashGitBlobSource(source, sizeof(content), buffer, sizeof(buffer), hasher, sha, {}));
+  EXPECT_EQ(toHex(sha), "ce013625030ba8dba906f756967f9e9ca394464a");
+}
+
+namespace {
+
+std::string hashThroughSource(std::vector<uint8_t> content, uint64_t expectedSize, size_t bufferLen) {
+  MemoryRecordStream source(content.data(), content.size(), content.size());
+  std::vector<uint8_t> buffer(bufferLen);
+  GitBlobHasher hasher;
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  if (!hashGitBlobSource(source, expectedSize, buffer.data(), buffer.size(), hasher, sha, {})) return "failed";
+  return toHex(sha);
+}
+
+// Serves its content, then fails every read.
+class FailingAfterContentSource : public RecordSource {
+ public:
+  explicit FailingAfterContentSource(std::vector<uint8_t> content) : content(std::move(content)) {}
+  int read(uint8_t* buf, size_t len) override {
+    if (offset == content.size()) return -1;
+    const size_t count = std::min(len, content.size() - offset);
+    memcpy(buf, content.data() + offset, count);
+    offset += count;
+    return static_cast<int>(count);
+  }
+  bool seek(uint32_t) override { return false; }
+
+ private:
+  std::vector<uint8_t> content;
+  size_t offset = 0;
+};
+
+}  // namespace
+
+TEST(GitBlobSourceHash, AnyBufferSizeMatchesGit) {
+  for (size_t bufferLen : {1, 7, 64, 4096}) {
+    SCOPED_TRACE(bufferLen);
+    EXPECT_EQ(hashThroughSource(modPattern(1048576), 1048576, bufferLen), "b859c508ba043c1601650b2010f9b6e6eccc0a7f");
+    EXPECT_EQ(hashThroughSource({}, 0, bufferLen), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+  }
+}
+
+TEST(GitBlobSourceHash, SourceShorterThanExpectedFails) {
+  EXPECT_EQ(hashThroughSource({'h', 'e', 'l', 'l', 'o'}, 6, 4096), "failed");
+}
+
+TEST(GitBlobSourceHash, SourceLongerThanExpectedFails) {
+  EXPECT_EQ(hashThroughSource({'h', 'e', 'l', 'l', 'o', '\n', '!'}, 6, 4096), "failed");
+  EXPECT_EQ(hashThroughSource({'h', 'e', 'l', 'l', 'o', '\n', '!'}, 6, 1), "failed");
+}
+
+TEST(GitBlobSourceHash, ReadErrorFails) {
+  FailingAfterContentSource source({'h', 'e', 'l', 'l', 'o', '\n'});
+  uint8_t buffer[4096];
+  GitBlobHasher hasher;
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  EXPECT_FALSE(hashGitBlobSource(source, 6, buffer, sizeof(buffer), hasher, sha, {}));
+}
+
+TEST(GitBlobSourceHash, TickFiresOncePerChunk) {
+  std::vector<uint8_t> content = modPattern(10000);
+  MemoryRecordStream source(content.data(), content.size(), content.size());
+  uint8_t buffer[4096];
+  GitBlobHasher hasher;
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  int ticks = 0;
+  const GitBlobHashTick tick{&ticks, [](void* ctx) { ++*static_cast<int*>(ctx); }};
+  ASSERT_TRUE(hashGitBlobSource(source, content.size(), buffer, sizeof(buffer), hasher, sha, tick));
+  EXPECT_EQ(ticks, 3);
+}
+
+TEST(GitBlobSourceHash, MissingBufferIsRefused) {
+  uint8_t content[] = {'h', 'e', 'l', 'l', 'o', '\n'};
+  MemoryRecordStream source(content, sizeof(content), sizeof(content));
+  uint8_t buffer[16];
+  GitBlobHasher hasher;
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  EXPECT_FALSE(hashGitBlobSource(source, sizeof(content), buffer, 0, hasher, sha, {}));
+  EXPECT_FALSE(hashGitBlobSource(source, sizeof(content), nullptr, sizeof(buffer), hasher, sha, {}));
 }
