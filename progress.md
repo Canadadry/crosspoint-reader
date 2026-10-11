@@ -1,7 +1,7 @@
 - [x] Phase 0 — De-risk the GitHub API
   - [x] Step 0.0 — Owner check of the API from a PC
 - [ ] Phase 1 — Pure logic in lib/GitSync/, host-tested
-  - [ ] Step 1.1 — Git blob hash
+  - [x] Step 1.1 — Git blob hash
     - [x] Blob hasher and hex helpers
   - [ ] Step 1.2 — Path filter
   - [ ] Step 1.3 — Trees response parser

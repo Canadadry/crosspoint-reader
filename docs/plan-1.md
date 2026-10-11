@@ -422,3 +422,19 @@ Done 2026-10-11 by the owner, with curl from macOS and a fine-grained token sent
   repository.
 - The repository has a `.atelier/` working directory of Markdown files, which the dot
   filter excludes as intended.
+
+### Step 1.1
+
+- `lib/GitSync/GitBlobHasher.{h,cpp}`: `GitBlobHasher` with `begin(uint64_t size)`,
+  `update(const uint8_t*, size_t)` and `bool finish(uint8_t out[20])`, plus the free
+  functions `shaFromHex(const char*, size_t, out)` and `shaToHex(sha, char[41])`. No
+  namespace, no heap, no logging, no Arduino include; about 120 bytes per hasher.
+- `finish()` returns false and zero-fills the output when the bytes fed differ from the
+  declared size: step 6 gets its size check from it.
+- `shaFromHex` takes an explicit length (JSON parser strings are not null-terminated) and
+  accepts upper- or lower-case hex.
+- Tests: `test/git_sync_blob_hash/` (20 cases), with vectors from `git hash-object`.
+- Build net: `pio run -e default` green, no warning in `src/` or `lib/`; formatting clean
+  with clang-format 21. The sandbox needed the `pioarduino` PyPI package and the proxy CA
+  in certifi to build; nothing in the repository changed for it.
+- No `guideline` decisions.
