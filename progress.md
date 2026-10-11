@@ -19,7 +19,7 @@
     - [x] Moves and collisions
   - [ ] Step 1.6 — Sync executor
     - [x] Book cache and bookmark paths
-    - [ ] Storage interface and in-memory storage
+    - [x] Storage interface and in-memory storage
     - [ ] Executor core
     - [ ] Moves and reading-state migration
     - [ ] Planner wiring and system tests

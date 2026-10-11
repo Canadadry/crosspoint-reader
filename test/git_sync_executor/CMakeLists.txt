@@ -1,5 +1,7 @@
 add_executable(SyncExecutorTest
   BookPathTest.cpp
+  MemorySyncStorageTest.cpp
+  ${REPO_ROOT}/lib/GitSync/SyncPathFold.cpp
   ${REPO_ROOT}/lib/GitSync/BookmarkPath.cpp
   ${REPO_ROOT}/src/util/BookmarkUtil.cpp
 )
