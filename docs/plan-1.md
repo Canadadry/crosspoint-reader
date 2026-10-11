@@ -35,25 +35,16 @@ The goals behind every rule below:
   *Contents: Read* only. `HttpDownloader` already sends preemptive Basic auth
   (`src/network/HttpDownloader.cpp:84-88`, in `runGetWolf`), and GitHub accepts the token as the password
   of Basic auth.
-- **TLS is verified for GitHub** (owner decision, 2026-10-11). The token never goes out
-  over an unverified connection: the sync's requests pin the root CAs of `api.github.com`
-  instead of `setInsecure()` (`src/network/HttpDownloader.cpp:75`). The SDK supports it
-  through `SecureHttpClient::setCACert` (`freeink-sdk/libs/network/SecureNet/include/SecureHttpClient.h:70-73`),
-  which loads one PEM buffer, so several roots can be concatenated.
-  - The roots are a `constexpr` PEM bundle in flash. It covers GitHub's current chain and
-    its previous CA, so a CA rotation does not break the sync.
-  - An optional `/.crosspoint/github-ca.pem` overrides the bundle, so the owner can follow
-    a rotation without a firmware update.
-  - The certificate's host name must be `api.github.com`. `freeink::SecureClient` never
-    checks it today (`freeink-sdk/libs/network/SecureNet/src/SecureClient.cpp:87-103`: CA
-    loaded, no `wolfSSL_check_domain_name`), so any certificate chaining to the pinned CA
-    would pass. The check goes into the owner's fork of the SDK (owner decision,
-    2026-10-11): `Canadadry/freeink-sdk`, forked from `Free-Ink/freeink-sdk`. The
-    `freeink-sdk` submodule URL in `.gitmodules` points to the fork, and the submodule is
-    bumped to the commit carrying the check. No upstream pull request is part of this plan.
-  - A verification failure aborts the sync with a clear message, and changes nothing on the
-    card.
-  - Other features (OPDS, OTA, KOReader) keep their current behaviour: out of scope here.
+- **TLS is not verified (owner decision, 2026-10-11).** The sync uses the same transport
+  as OPDS, OTA and KOReader, which calls `setInsecure()` (`src/network/HttpDownloader.cpp:75`):
+  traffic is encrypted, but the server certificate is not checked. The owner accepts the
+  risk: on a hostile network, a man-in-the-middle could capture the token, and the token
+  can only read the one books repository. Mitigations are on the owner's side (an expiring
+  token, syncing on a trusted Wi-Fi). Rejected: pinning GitHub's root CAs plus a hostname
+  check, because `freeink::SecureClient` never calls `wolfSSL_check_domain_name`
+  (`freeink-sdk/libs/network/SecureNet/src/SecureClient.cpp:87-103`), and adding it needs
+  either a fork of `freeink-sdk` or a vendored copy of `SecureNet`. That is not worth it
+  for a read-only token on one repository.
 - **Configuration file**: `/.crosspoint/github-sync.json`, written by the owner from a PC.
   There is no on-device editing and no keyboard entry of the token.
 
@@ -332,21 +323,10 @@ in `.claude/skills/` use (`git-commit`, `tdd`, `check-build`):
    - an optional extra request header for the `Accept` value;
    - a "no cross-host redirect when credentials are set" guard.
 
-   - certificate verification for the sync's requests: `setCACert` with the pinned roots
-     instead of `setInsecure()`, opt-in per call so OPDS, OTA and KOReader keep their
-     current behaviour;
-   - the host name check: in the fork `Canadadry/freeink-sdk`, `SecureClient` calls
-     `wolfSSL_check_domain_name(ssl, host)` when it verifies, with the result of
-     `wolfSSL_CTX_load_verify_buffer` checked and logged; then `.gitmodules` points to the
-     fork and the submodule is bumped. If the fork does not exist yet or this session cannot
-     push to it, the step stops here and asks the owner to create it.
-
    Both land on the compiled `runGetWolf` path, and on the `esp_http_client` path too if
    it is kept. Existing callers are unchanged.
    *Verified by*: `pio run`; a review naming the `#if` branch each change lands in; and a
-   review that OPDS, OTA and KOReader call sites compile unchanged. On the device (step 12
-   checklist), a sync succeeds with the real roots, and fails with a clear error when the
-   override file holds an unrelated root.
+   review that OPDS, OTA and KOReader call sites compile unchanged.
 9. **Sync engine glue** (`src/network/GitSync*.cpp` or `src/util/`). It wires the step 6
    executor to the device:
    - the `HalStorage` implementation of its storage interface;
@@ -397,9 +377,6 @@ in `.claude/skills/` use (`git-commit`, `tdd`, `check-build`):
     - Back during the first sync's adoption, then Update again, resumes without re-hashing
       the files already adopted;
     - the duration of the first sync, recorded with the library's file count;
-    - a sync with the built-in roots succeeds; putting an unrelated root in
-      `/.crosspoint/github-ca.pem` makes it fail with a clear message and no change on the
-      card;
     - the stack high-water mark of the sync's context (`uxTaskGetStackHighWaterMark`),
       logged after a run that includes a TLS fetch, with at least 1 KB left;
     - Wi-Fi drops mid-download and the next run recovers;
