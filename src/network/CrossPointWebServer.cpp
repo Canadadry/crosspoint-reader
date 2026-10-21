@@ -26,6 +26,7 @@
 #include "html/SettingsPageHtml.generated.h"
 #include "html/js/jszip_minJs.generated.h"
 #include "util/BookCacheUtils.h"
+#include "util/ProtectedPath.h"
 #include "util/TaskWatchdog.h"
 
 namespace {
@@ -68,6 +69,10 @@ String normalizeWebPath(const String& inputPath) {
     result = result.substring(0, result.length() - 1);
   }
   return result;
+}
+
+bool isProtectedWebPath(const String& path) {
+  return isProtectedStoragePath(std::string_view(path.c_str(), path.length()));
 }
 
 bool isProtectedItemName(const String& name) {
@@ -506,6 +511,10 @@ void CrossPointWebServer::handleFileListData() const {
       currentPath = currentPath.substring(0, currentPath.length() - 1);
     }
   }
+  if (isProtectedWebPath(currentPath)) {
+    server->send(403, "text/plain", "Cannot access protected items");
+    return;
+  }
 
   server->setContentLength(CONTENT_LENGTH_UNKNOWN);
   server->send(200, "application/json", "");
@@ -557,16 +566,9 @@ void CrossPointWebServer::handleDownload() const {
     itemPath = "/" + itemPath;
   }
 
-  const String itemName = itemPath.substring(itemPath.lastIndexOf('/') + 1);
-  if (itemName.startsWith(".")) {
-    server->send(403, "text/plain", "Cannot access system files");
+  if (isProtectedWebPath(itemPath)) {
+    server->send(403, "text/plain", "Cannot access protected items");
     return;
-  }
-  for (const auto* item : HIDDEN_ITEMS) {
-    if (itemName.equals(item)) {
-      server->send(403, "text/plain", "Cannot access protected items");
-      return;
-    }
   }
 
   if (!Storage.exists(itemPath.c_str())) {
@@ -699,6 +701,12 @@ void CrossPointWebServer::handleUpload(UploadState& state) const {
     String filePath = state.path;
     if (!filePath.endsWith("/")) filePath += "/";
     filePath += state.fileName;
+
+    if (isProtectedWebPath(filePath)) {
+      state.error = "Cannot upload to protected path";
+      LOG_DBG("WEB", "[UPLOAD] Protected path: %s", filePath.c_str());
+      return;
+    }
 
     // Check if file already exists - SD operations can be slow
     resetTaskWatchdogIfSubscribed();
@@ -838,6 +846,11 @@ void CrossPointWebServer::handleCreateFolder() const {
 
   LOG_DBG("WEB", "Creating folder: %s", folderPath.c_str());
 
+  if (isProtectedWebPath(folderPath)) {
+    server->send(403, "text/plain", "Cannot create protected folder");
+    return;
+  }
+
   // Check if already exists
   if (Storage.exists(folderPath.c_str())) {
     server->send(400, "text/plain", "Folder already exists");
@@ -882,7 +895,7 @@ void CrossPointWebServer::handleRename() const {
   }
 
   const String itemName = itemPath.substring(itemPath.lastIndexOf('/') + 1);
-  if (isProtectedItemName(itemName)) {
+  if (isProtectedWebPath(itemPath)) {
     server->send(403, "text/plain", "Cannot rename protected item");
     return;
   }
@@ -955,16 +968,13 @@ void CrossPointWebServer::handleMove() const {
   }
 
   const String itemName = itemPath.substring(itemPath.lastIndexOf('/') + 1);
-  if (isProtectedItemName(itemName)) {
+  if (isProtectedWebPath(itemPath)) {
     server->send(403, "text/plain", "Cannot move protected item");
     return;
   }
-  if (destPath != "/") {
-    const String destName = destPath.substring(destPath.lastIndexOf('/') + 1);
-    if (isProtectedItemName(destName)) {
-      server->send(403, "text/plain", "Cannot move into protected folder");
-      return;
-    }
+  if (isProtectedWebPath(destPath)) {
+    server->send(403, "text/plain", "Cannot move into protected folder");
+    return;
   }
 
   if (!Storage.exists(itemPath.c_str())) {
@@ -1085,25 +1095,7 @@ void CrossPointWebServer::handleDelete() const {
       itemPath = "/" + itemPath;
     }
 
-    // Security check: prevent deletion of protected items
-    const String itemName = itemPath.substring(itemPath.lastIndexOf('/') + 1);
-
-    // Hidden/system files are protected
-    if (itemName.startsWith(".")) {
-      failedItems += itemPath + " (hidden/system file); ";
-      allSuccess = false;
-      continue;
-    }
-
-    // Check against explicitly protected items
-    bool isProtected = false;
-    for (const auto* item : HIDDEN_ITEMS) {
-      if (itemName.equals(item)) {
-        isProtected = true;
-        break;
-      }
-    }
-    if (isProtected) {
+    if (isProtectedWebPath(itemPath)) {
       failedItems += itemPath + " (protected file); ";
       allSuccess = false;
       continue;
@@ -1663,6 +1655,12 @@ void CrossPointWebServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* 
           String filePath = wsUploadPath;
           if (!filePath.endsWith("/")) filePath += "/";
           filePath += wsUploadFileName;
+
+          if (isProtectedWebPath(filePath)) {
+            LOG_DBG("WS", "START rejected: protected path %s", filePath.c_str());
+            wsServer->sendTXT(num, "ERROR:Cannot upload to protected path");
+            return;
+          }
 
           resetTaskWatchdogIfSubscribed();
           if (Storage.exists(filePath.c_str())) {
