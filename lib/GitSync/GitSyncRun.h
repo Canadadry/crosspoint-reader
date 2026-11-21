@@ -83,7 +83,7 @@ struct GitSyncReport {
 // Consecutive blob NetworkErrors that stop the run with TooManyFetchFailures; an Ok fetch resets the count.
 constexpr uint8_t MAX_CONSECUTIVE_FETCH_FAILURES = 3;
 // Transfers a blob may restart from its last delivered byte after a NetworkError that came after progress.
-constexpr uint8_t MAX_BLOB_RESUMES = 3;
+constexpr uint8_t MAX_BLOB_RESUMES = 16;
 // Read size of the adoption hash, allocated once per run.
 constexpr size_t GIT_SYNC_HASH_BUFFER_BYTES = 4096;
 // Upper bound of the run's own state, allocated once per run, for the glue's budget line.

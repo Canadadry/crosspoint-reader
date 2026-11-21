@@ -583,9 +583,20 @@ TEST_F(GitSyncRunTest, ABlobCutOffMidTransferResumesWhereItStopped) {
   EXPECT_EQ(blobBytesServed, book.size());
 }
 
+TEST_F(GitSyncRunTest, ManyCutsWithProgressStillLandTheBlobInOneRun) {
+  const std::string book = singleBigBook(1000);
+  for (size_t cut = 50; cut <= 750; cut += 50) blobDrops.push_back(cut);
+
+  const GitSyncReport report = run();
+
+  EXPECT_EQ(report.error, GitSyncError::Ok);
+  EXPECT_EQ(report.run.fileErrors, 0u);
+  EXPECT_EQ(bookFiles(storage), (std::map<std::string, std::string>{{"/Big.epub", book}}));
+}
+
 TEST_F(GitSyncRunTest, ResumesStopAfterMaxBlobResumesAndTheFileIsRetriedNextRun) {
   const std::string book = singleBigBook(1000);
-  blobDrops = {100, 200, 300, 400, 500};
+  for (size_t cut = 10; cut <= 10u * (MAX_BLOB_RESUMES + 2); cut += 10) blobDrops.push_back(cut);
 
   const GitSyncReport report = run();
 
