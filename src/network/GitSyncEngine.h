@@ -18,6 +18,9 @@ constexpr uint8_t RAW_URL_TOO_LONG = 99;
 struct Diagnostics {
   BlobFetchFailure api;
   BlobFetchFailure ranged;
+  // Lowest free heap and largest free block seen while blob bodies streamed, in bytes; 0 when none streamed.
+  uint32_t transferMinFreeHeap = 0;
+  uint32_t transferMinLargestBlock = 0;
 };
 
 // Runs one whole sync. The caller owns config (from git_sync_config::load) and is already on Wi-Fi. The token is

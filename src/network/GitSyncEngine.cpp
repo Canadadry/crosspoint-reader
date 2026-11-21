@@ -103,6 +103,19 @@ struct EngineContext {
   // The caller answered false once: a refused body is then the run stopping, not a failure.
   bool cancelRequested = false;
   Diagnostics diagnostics;
+
+  // Free heap on every chunk; the largest block, which walks the free list, on every 16th.
+  void sampleHeap(uint32_t chunk) {
+    const uint32_t free = ESP.getFreeHeap();
+    if (diagnostics.transferMinFreeHeap == 0 || free < diagnostics.transferMinFreeHeap) {
+      diagnostics.transferMinFreeHeap = free;
+    }
+    if (chunk % 16 != 0) return;
+    const uint32_t block = ESP.getMaxAllocHeap();
+    if (diagnostics.transferMinLargestBlock == 0 || block < diagnostics.transferMinLargestBlock) {
+      diagnostics.transferMinLargestBlock = block;
+    }
+  }
 };
 
 static_assert(GIT_SYNC_RUN_STATE_MAX_BYTES + sizeof(EngineContext) <=
@@ -132,8 +145,14 @@ GitFetchStatus fetch(EngineContext& self, const SyncChunkSink& sink, HttpDownloa
   options.statusOut = &status;
   self.sink = &sink;
   EngineContext* const ctx = &self;
+  const bool sampleHeap = failure != nullptr;
+  uint32_t chunks = 0;
   const HttpDownloader::DownloadError error = HttpDownloader::fetchStream(
-      self.url, [ctx](const uint8_t* data, size_t len) { return ctx->sink->write(ctx->sink->ctx, data, len); },
+      self.url,
+      [ctx, sampleHeap, &chunks](const uint8_t* data, size_t len) {
+        if (sampleHeap) ctx->sampleHeap(chunks++);
+        return ctx->sink->write(ctx->sink->ctx, data, len);
+      },
       GITHUB_BASIC_AUTH_USER, self.password, options);
   self.sink = nullptr;
 

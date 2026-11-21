@@ -14,11 +14,15 @@ struct GitSyncCodeInputs {
   uint8_t rangedError = 0;  // the same for the last failed ranged request
   int16_t rangedStatus = 0;
   uint32_t lowestFreeHeap = 0;  // bytes
+  // Lowest free heap and largest free block seen while blob bodies streamed, in bytes; 0 when none streamed.
+  uint32_t transferMinFreeHeap = 0;
+  uint32_t transferMinLargestBlock = 0;
 };
 
-// The longest code, "E255.255 A255/-32768 R255/-32768 <u64/1024>/<u64/1024>K H<u32/1024>", and its terminator.
-constexpr size_t GIT_SYNC_CODE_CAPACITY = 96;
+// The longest code, "E255.255 A255/-32768 R255/-32768 <u64/1024>/<u64/1024>K H<u32/1024> T<u32/1024>/<u32/1024>",
+// and its terminator.
+constexpr size_t GIT_SYNC_CODE_CAPACITY = 112;
 
-// "E<run>.<file>[ A<err>/<status>][ R<err>/<status>][ <heldK>/<sizeK>K] H<heapK>": a request part only when that
-// request failed, the bytes only for a file error with a known size.
+// "E<run>.<file>[ A<err>/<status>][ R<err>/<status>][ <heldK>/<sizeK>K] H<heapK>[ T<freeK>/<blockK>]": a request
+// part only when that request failed, the bytes only for a file error with a known size, T only once a blob streamed.
 void formatGitSyncCode(char* out, size_t capacity, const GitSyncCodeInputs& in);

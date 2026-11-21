@@ -439,10 +439,13 @@ void GitSyncActivity::renderDone(LineStack& lines) const {
     in.rangedError = diagnostics.ranged.error;
     in.rangedStatus = diagnostics.ranged.status;
     in.lowestFreeHeap = lowestFreeHeap;
+    in.transferMinFreeHeap = diagnostics.transferMinFreeHeap;
+    in.transferMinLargestBlock = diagnostics.transferMinLargestBlock;
     char code[GIT_SYNC_CODE_CAPACITY];
     formatGitSyncCode(code, sizeof(code), in);
-    snprintf(line, sizeof(line), tr(STR_GIT_SYNC_CODE_FORMAT), code);
-    drawLine(lines, line);
+    char codeLine[GIT_SYNC_CODE_CAPACITY + 16];
+    snprintf(codeLine, sizeof(codeLine), tr(STR_GIT_SYNC_CODE_FORMAT), code);
+    drawWrapped(lines, codeLine, 2);
   }
 }
 

@@ -30,4 +30,9 @@ void formatGitSyncCode(char* out, size_t capacity, const GitSyncCodeInputs& in) 
            snprintf(out + used, capacity - used, " %" PRIu64 "/%" PRIu64 "K", in.fileHeld / 1024, in.fileSize / 1024));
   }
   append(capacity, used, snprintf(out + used, capacity - used, " H%" PRIu32, in.lowestFreeHeap / 1024));
+  if (in.transferMinFreeHeap != 0) {
+    append(capacity, used,
+           snprintf(out + used, capacity - used, " T%" PRIu32 "/%" PRIu32, in.transferMinFreeHeap / 1024,
+                    in.transferMinLargestBlock / 1024));
+  }
 }

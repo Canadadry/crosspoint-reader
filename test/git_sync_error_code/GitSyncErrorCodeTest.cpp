@@ -36,8 +36,21 @@ TEST(GitSyncErrorCode, LargestValuesFitTheCapacity) {
   in.rangedError = 255;
   in.rangedStatus = INT16_MIN;
   in.lowestFreeHeap = UINT32_MAX;
+  in.transferMinFreeHeap = UINT32_MAX;
+  in.transferMinLargestBlock = UINT32_MAX;
   char code[GIT_SYNC_CODE_CAPACITY];
   formatGitSyncCode(code, sizeof(code), in);
   EXPECT_EQ(std::string(code),
-            "E255.255 A255/-32768 R255/-32768 18014398509481983/18014398509481983K H4194303");
+            "E255.255 A255/-32768 R255/-32768 18014398509481983/18014398509481983K H4194303 T4194303/4194303");
+}
+
+TEST(GitSyncErrorCode, HeapDuringTheBlobTransfersFollowsTheRunsLowestHeap) {
+  GitSyncCodeInputs in;
+  in.fileError = 2;
+  in.lowestFreeHeap = 8 * 1024;
+  in.transferMinFreeHeap = 9 * 1024 + 100;
+  in.transferMinLargestBlock = 4 * 1024;
+  char code[GIT_SYNC_CODE_CAPACITY];
+  formatGitSyncCode(code, sizeof(code), in);
+  EXPECT_STREQ(code, "E0.2 H8 T9/4");
 }
