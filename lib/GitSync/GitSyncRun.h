@@ -8,9 +8,10 @@
 
 // Ok: the body ended normally. Failed: the sink refused the body. NetworkError: connection, TLS or HTTP status
 // failure. RedirectRefused: a redirect to another origin was refused. Aborted: stopped because the run asked.
-enum class GitFetchStatus : uint8_t { Ok, Failed, NetworkError, RedirectRefused, Aborted };
+// RangeRefused: the server cannot serve the blob from a non-zero offset; nothing reached the sink.
+enum class GitFetchStatus : uint8_t { Ok, Failed, NetworkError, RedirectRefused, Aborted, RangeRefused };
 
-// The network. A transfer ends when the sink returns false.
+// The network. A transfer ends when the sink returns false. fetchBlob serves the blob from request.offset.
 struct GitSyncTransport {
   void* ctx;
   GitFetchStatus (*fetchTree)(void* ctx, const SyncChunkSink& sink);
@@ -81,6 +82,8 @@ struct GitSyncReport {
 
 // Consecutive blob NetworkErrors that stop the run with TooManyFetchFailures; an Ok fetch resets the count.
 constexpr uint8_t MAX_CONSECUTIVE_FETCH_FAILURES = 3;
+// Transfers a blob may restart from its last delivered byte after a NetworkError that came after progress.
+constexpr uint8_t MAX_BLOB_RESUMES = 3;
 // Read size of the adoption hash, allocated once per run.
 constexpr size_t GIT_SYNC_HASH_BUFFER_BYTES = 4096;
 // Upper bound of the run's own state, allocated once per run, for the glue's budget line.

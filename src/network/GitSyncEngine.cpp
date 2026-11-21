@@ -65,6 +65,8 @@ const char* describeDownloadError(HttpDownloader::DownloadError error) {
       return "aborted";
     case HttpDownloader::REDIRECT_REFUSED:
       return "redirect refused";
+    case HttpDownloader::RANGE_REFUSED:
+      return "range refused";
   }
   return "unknown";
 }
@@ -113,13 +115,17 @@ bool onProgress(void* ctx, const GitSyncProgress& progress) {
   return false;
 }
 
-// The only caller of HttpDownloader::fetchStream. url holds the request's URL.
-GitFetchStatus fetch(EngineContext& self, const SyncChunkSink& sink, const char* accept, const char* what) {
+HttpDownloader::RequestOptions acceptOptions(const char* accept) {
   HttpDownloader::RequestOptions options;
   options.headerName = "Accept";
   options.headerValue = accept;
   options.refuseCrossOriginRedirect = true;
+  return options;
+}
 
+// The only caller of HttpDownloader::fetchStream. url holds the request's URL.
+GitFetchStatus fetch(EngineContext& self, const SyncChunkSink& sink, const HttpDownloader::RequestOptions& options,
+                     const char* what) {
   self.sink = &sink;
   EngineContext* const ctx = &self;
   const HttpDownloader::DownloadError error = HttpDownloader::fetchStream(
@@ -141,6 +147,8 @@ GitFetchStatus fetch(EngineContext& self, const SyncChunkSink& sink, const char*
       return GitFetchStatus::NetworkError;
     case HttpDownloader::ABORTED:
       return GitFetchStatus::Aborted;
+    case HttpDownloader::RANGE_REFUSED:
+      return GitFetchStatus::RangeRefused;
   }
   return GitFetchStatus::NetworkError;
 }
@@ -152,17 +160,33 @@ GitFetchStatus fetchTree(void* ctx, const SyncChunkSink& sink) {
     return GitFetchStatus::Failed;
   }
   self->url.assign(self->urlBuffer);
-  return fetch(*self, sink, GITHUB_ACCEPT_JSON, "Tree");
+  return fetch(*self, sink, acceptOptions(GITHUB_ACCEPT_JSON), "Tree");
+}
+
+// The API ignores Range, so a resumed blob comes from the raw host by path on the branch; the run verifies the
+// result against the blob SHA. Whatever stops that path makes the run fetch the blob whole from the API instead.
+GitFetchStatus fetchBlobFrom(EngineContext& self, const SyncFetchRequest& request, const SyncChunkSink& sink) {
+  if (!formatRawUrl(self.urlBuffer, sizeof(self.urlBuffer), self.config, request.repoPath)) {
+    LOG_ERR(LOG_TAG, "Raw URL does not fit for %s", request.repoPath);
+    return GitFetchStatus::RangeRefused;
+  }
+  self.url.assign(self.urlBuffer);
+  HttpDownloader::RequestOptions options;
+  options.refuseCrossOriginRedirect = true;
+  options.rangeStart = request.offset;
+  const GitFetchStatus fetched = fetch(self, sink, options, "Ranged blob");
+  return fetched == GitFetchStatus::RedirectRefused ? GitFetchStatus::RangeRefused : fetched;
 }
 
 GitFetchStatus fetchBlob(void* ctx, const SyncFetchRequest& request, const SyncChunkSink& sink) {
   auto* self = static_cast<EngineContext*>(ctx);
+  if (request.offset > 0) return fetchBlobFrom(*self, request, sink);
   if (!formatBlobUrl(self->urlBuffer, sizeof(self->urlBuffer), self->config, request.sha)) {
     LOG_ERR(LOG_TAG, "Cannot build the blob URL");
     return GitFetchStatus::Failed;
   }
   self->url.assign(self->urlBuffer);
-  return fetch(*self, sink, GITHUB_ACCEPT_RAW, "Blob");
+  return fetch(*self, sink, acceptOptions(GITHUB_ACCEPT_RAW), "Blob");
 }
 
 // The executor already moved the book, its caches and its bookmarks; only the stores follow here, saved before the

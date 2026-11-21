@@ -61,10 +61,12 @@ enum class SyncOpOutcome : uint8_t {
 };
 
 // sha and size are the tree entry's; repoPath is repository-relative, for logs and progress.
+// The sink's first byte is the blob's byte at offset.
 struct SyncFetchRequest {
   const uint8_t* sha;
   uint64_t size;
   const char* repoPath;
+  uint64_t offset = 0;
 };
 
 // write returns false when the bytes cannot be stored or exceed the declared size; the fetch then stops.
@@ -94,6 +96,9 @@ struct SyncExecutorCallbacks {
   // Idempotent; false is fatal.
   bool (*bookMoved)(void* ctx, const char* oldAbsPath, const char* newAbsPath);
   void (*onProgress)(void* ctx, const SyncProgress& progress);
+  // Feeds the next length bytes of file into hasher; false on a short read. Null discards an interrupted download
+  // instead of resuming it.
+  bool (*hashPrefix)(void* ctx, SyncFile& file, uint64_t length, GitBlobHasher& hasher) = nullptr;
 };
 
 // Applies the planner's operations to the card. One executor per sync: prepare(), then apply(), or
@@ -152,6 +157,11 @@ class SyncExecutor {
   SyncOpOutcome dropTemp(SyncOpOutcome outcome);
   SyncOpOutcome fatal(const char* what, const char* path);
   SyncOpOutcome fetchIntoTemp();
+  uint64_t heldBytes();
+  bool startTemp();
+  bool readHeldId(uint8_t sha[GitBlobHasher::SHA_SIZE], uint64_t& size);
+  bool removeHeldDownload();
+  SyncRunStatus checkHeldDownload();
   SyncOpOutcome journalPut(uint32_t replaces);
   SyncOpOutcome journalFlush();
   bool clearCache(const char* absPath);

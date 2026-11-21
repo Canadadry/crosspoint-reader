@@ -228,7 +228,7 @@ TEST_F(SyncExecutorTest, BadBytesNeverLandAndAreRetriedByTheNextRun) {
   }
 }
 
-TEST_F(SyncExecutorTest, FetchFailingMidStreamLeavesNoPartialFile) {
+TEST_F(SyncExecutorTest, FetchFailingMidStreamLeavesTheTargetAloneAndKeepsTheBytesReceived) {
   seedFile(storage, "/a.epub", "keep me");
   fetchMode = FetchMode::FailMidStream;
   auto executor = begin({{"a.epub", "a longer remote body"}});
@@ -238,8 +238,122 @@ TEST_F(SyncExecutorTest, FetchFailingMidStreamLeavesNoPartialFile) {
 
   EXPECT_EQ(result.fileErrors, 1u);
   EXPECT_EQ(fileContent(storage, "/a.epub"), "keep me");
-  EXPECT_FALSE(storage.exists(SYNC_DOWNLOAD_TMP_PATH));
+  EXPECT_EQ(fileContent(storage, SYNC_DOWNLOAD_TMP_PATH), "a longer r");
   EXPECT_TRUE(liveEntries(storage).empty());
+}
+
+TEST_F(SyncExecutorTest, NextRunFetchesOnlyWhatTheInterruptedDownloadLacked) {
+  fetchMode = FetchMode::FailMidStream;
+  auto executor = begin({{"a.epub", "a longer remote body"}});
+  executor->execute(makeOp(SyncOpKind::Download, NO_OFFSET, treeOffsets[0]));
+  executor->end();
+  fetchMode = FetchMode::Serve;
+  fetchOffsets.clear();
+
+  executor = begin({{"a.epub", "a longer remote body"}});
+  EXPECT_EQ(executor->execute(makeOp(SyncOpKind::Download, NO_OFFSET, treeOffsets[0])), SyncOpOutcome::Applied);
+  const SyncRunResult result = executor->end();
+
+  EXPECT_EQ(result.added, 1u);
+  EXPECT_EQ(fetchOffsets, (std::vector<uint64_t>{10}));
+  EXPECT_EQ(fileContent(storage, "/a.epub"), "a longer remote body");
+  EXPECT_FALSE(storage.exists(SYNC_DOWNLOAD_TMP_PATH));
+  EXPECT_FALSE(storage.exists(SYNC_DOWNLOAD_ID_PATH));
+}
+
+TEST_F(SyncExecutorTest, HeldBytesOfAnotherBlobAreDiscardedAndTheDownloadStartsOver) {
+  fetchMode = FetchMode::FailMidStream;
+  auto executor = begin({{"a.epub", "a longer remote body"}});
+  executor->execute(makeOp(SyncOpKind::Download, NO_OFFSET, treeOffsets[0]));
+  executor->end();
+  fetchMode = FetchMode::Serve;
+  fetchOffsets.clear();
+
+  executor = begin({{"b.epub", "another book"}});
+  EXPECT_EQ(executor->execute(makeOp(SyncOpKind::Download, NO_OFFSET, treeOffsets[0])), SyncOpOutcome::Applied);
+  executor->end();
+
+  EXPECT_EQ(fetchOffsets, (std::vector<uint64_t>{0}));
+  EXPECT_EQ(fileContent(storage, "/b.epub"), "another book");
+  EXPECT_FALSE(storage.exists(SYNC_DOWNLOAD_TMP_PATH));
+  EXPECT_FALSE(storage.exists(SYNC_DOWNLOAD_ID_PATH));
+}
+
+TEST_F(SyncExecutorTest, CorruptHeldBytesFailVerificationAndTheNextRunDownloadsTheWholeBlob) {
+  fetchMode = FetchMode::FailMidStream;
+  auto executor = begin({{"a.epub", "a longer remote body"}});
+  executor->execute(makeOp(SyncOpKind::Download, NO_OFFSET, treeOffsets[0]));
+  executor->end();
+  seedFile(storage, SYNC_DOWNLOAD_TMP_PATH, "A LONGER R");
+  fetchMode = FetchMode::Serve;
+
+  executor = begin({{"a.epub", "a longer remote body"}});
+  EXPECT_EQ(executor->execute(makeOp(SyncOpKind::Download, NO_OFFSET, treeOffsets[0])), SyncOpOutcome::VerifyFailed);
+  executor->end();
+  EXPECT_FALSE(storage.exists(SYNC_DOWNLOAD_TMP_PATH));
+  EXPECT_FALSE(storage.exists(SYNC_DOWNLOAD_ID_PATH));
+  fetchOffsets.clear();
+
+  executor = begin({{"a.epub", "a longer remote body"}});
+  EXPECT_EQ(executor->execute(makeOp(SyncOpKind::Download, NO_OFFSET, treeOffsets[0])), SyncOpOutcome::Applied);
+  executor->end();
+  EXPECT_EQ(fetchOffsets, (std::vector<uint64_t>{0}));
+  EXPECT_EQ(fileContent(storage, "/a.epub"), "a longer remote body");
+}
+
+TEST_F(SyncExecutorTest, HeldDownloadAlreadyCompleteLandsWithoutAFetch) {
+  fetchMode = FetchMode::FailMidStream;
+  auto executor = begin({{"a.epub", "a longer remote body"}});
+  executor->execute(makeOp(SyncOpKind::Download, NO_OFFSET, treeOffsets[0]));
+  executor->end();
+  seedFile(storage, SYNC_DOWNLOAD_TMP_PATH, "a longer remote body");
+  fetches.clear();
+
+  executor = begin({{"a.epub", "a longer remote body"}});
+  EXPECT_EQ(executor->execute(makeOp(SyncOpKind::Download, NO_OFFSET, treeOffsets[0])), SyncOpOutcome::Applied);
+  executor->end();
+
+  EXPECT_TRUE(fetches.empty());
+  EXPECT_EQ(fileContent(storage, "/a.epub"), "a longer remote body");
+}
+
+TEST_F(SyncExecutorTest, PrepareKeepsAHeldDownloadOnlyBesideAnIdItCanStillMatch) {
+  struct Case {
+    const char* name;
+    bool keepTemp;
+    bool keepId;
+    const char* tempContent;
+    bool corruptId;
+    bool kept;
+  };
+  const Case cases[] = {
+      {"valid pair", true, true, nullptr, false, true},
+      {"id without temp", false, true, nullptr, false, false},
+      {"temp without id", true, false, nullptr, false, false},
+      {"temp longer than the blob", true, true, "a longer remote body, and more", false, false},
+      {"corrupt id", true, true, nullptr, true, false},
+  };
+  for (const Case& c : cases) {
+    storage = MemorySyncStorage();
+    fetchMode = FetchMode::FailMidStream;
+    auto executor = begin({{"a.epub", "a longer remote body"}});
+    executor->execute(makeOp(SyncOpKind::Download, NO_OFFSET, treeOffsets[0]));
+    executor->end();
+    executor.reset();
+    if (!c.keepTemp) storage.remove(SYNC_DOWNLOAD_TMP_PATH);
+    if (!c.keepId) storage.remove(SYNC_DOWNLOAD_ID_PATH);
+    if (c.tempContent) seedFile(storage, SYNC_DOWNLOAD_TMP_PATH, c.tempContent);
+    if (c.corruptId) {
+      std::string id = fileContent(storage, SYNC_DOWNLOAD_ID_PATH);
+      id[5] ^= 1;
+      seedFile(storage, SYNC_DOWNLOAD_ID_PATH, id);
+    }
+
+    EXPECT_EQ(makeExecutor()->prepare().status, SyncRunStatus::Ok) << c.name;
+
+    EXPECT_EQ(storage.exists(SYNC_DOWNLOAD_TMP_PATH), c.kept) << c.name;
+    EXPECT_EQ(storage.exists(SYNC_DOWNLOAD_ID_PATH), c.kept) << c.name;
+  }
 }
 
 TEST_F(SyncExecutorTest, TargetBlockedByAFolderOrAFileIsAPerFileErrorAndTheRunGoesOn) {

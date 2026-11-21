@@ -135,3 +135,35 @@ TEST(GitHubApi, RequestConstantsMatchVerifiedCalls) {
   EXPECT_STREQ(GITHUB_ACCEPT_RAW, "application/vnd.github.raw+json");
   EXPECT_STREQ(GITHUB_BASIC_AUTH_USER, "x");
 }
+
+TEST(GitHubApi, RawUrlNamesTheFileOnTheBranch) {
+  const GitSyncConfig config = makeConfig("Canadadry", "books", "main");
+  char url[GITHUB_API_URL_CAPACITY];
+  ASSERT_TRUE(formatRawUrl(url, sizeof(url), config, "Livres/SF/Dune.epub"));
+  EXPECT_STREQ(url, "https://raw.githubusercontent.com/Canadadry/books/main/Livres/SF/Dune.epub");
+}
+
+TEST(GitHubApi, RawUrlEscapesEveryPathByteButUnreservedOnesAndSlashes) {
+  const GitSyncConfig config = makeConfig("Canadadry", "books", "main");
+  char url[GITHUB_API_URL_CAPACITY];
+  ASSERT_TRUE(formatRawUrl(url, sizeof(url), config, "Romans/L'Étranger #1 (50%)?.epub"));
+  EXPECT_STREQ(url,
+               "https://raw.githubusercontent.com/Canadadry/books/main/"
+               "Romans/L%27%C3%89tranger%20%231%20%2850%25%29%3F.epub");
+}
+
+TEST(GitHubApi, RawUrlThatDoesNotFitIsRefusedEmpty) {
+  const GitSyncConfig config = makeConfig("Canadadry", "books", "main");
+  const std::string path(200, '\xC3');
+  char url[GITHUB_API_URL_CAPACITY];
+  memset(url, 'x', sizeof(url));
+  EXPECT_FALSE(formatRawUrl(url, sizeof(url), config, path.c_str()));
+  EXPECT_STREQ(url, "");
+}
+
+TEST(GitHubApi, RawUrlOfAnEmptyPathIsRefused) {
+  const GitSyncConfig config = makeConfig("Canadadry", "books", "main");
+  char url[GITHUB_API_URL_CAPACITY];
+  EXPECT_FALSE(formatRawUrl(url, sizeof(url), config, ""));
+  EXPECT_FALSE(formatRawUrl(url, sizeof(url), config, nullptr));
+}

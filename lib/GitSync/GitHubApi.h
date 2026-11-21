@@ -13,12 +13,13 @@ inline constexpr char GITHUB_ACCEPT_RAW[] = "application/vnd.github.raw+json";
 // Basic auth username; GitHub ignores it and takes the token as the password.
 inline constexpr char GITHUB_BASIC_AUTH_USER[] = "x";
 
-// The trees URL with the longest owner, repo and branch, plus its terminator; the blob URL is shorter.
+// The trees URL with the longest owner, repo and branch, plus its terminator; the blob URL is shorter, and a raw
+// URL longer than this is refused.
 constexpr size_t GITHUB_API_URL_CAPACITY = sizeof("https://api.github.com/repos/") - 1 + GitSyncConfig::OWNER_MAX + 1 +
                                            GitSyncConfig::REPO_MAX + sizeof("/git/trees/") - 1 +
                                            GitSyncConfig::BRANCH_MAX + sizeof("?recursive=1");
 
-// Both builders write the URL with its terminator into out. They return false and leave out empty when
+// The builders write the URL with its terminator into out. They return false and leave out empty when
 // a field they use is empty or unterminated, or when the URL does not fit. Fields are not escaped: the
 // config loader restricts them to URL-safe alphabets. Never log.
 
@@ -27,3 +28,7 @@ bool formatTreesUrl(char* out, size_t capacity, const GitSyncConfig& config);
 
 // https://api.github.com/repos/{owner}/{repo}/git/blobs/{sha as 40 lower-case hex}
 bool formatBlobUrl(char* out, size_t capacity, const GitSyncConfig& config, const uint8_t sha[GitBlobHasher::SHA_SIZE]);
+
+// https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{repoPath}, every path byte but unreserved ones and '/'
+// percent-encoded. This host serves byte ranges; the API hosts ignore them. A path that does not fit is refused.
+bool formatRawUrl(char* out, size_t capacity, const GitSyncConfig& config, const char* repoPath);

@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "BookmarkPath.h"
+#include "Crc32.h"
 #include "ManifestCompactor.h"
 #include "SyncPathFold.h"
 
@@ -17,6 +18,23 @@ constexpr const char* LOG_TAG = "GITEXEC";
 // The cache root every reader passes to bookCacheDir.
 constexpr char BOOK_CACHE_ROOT[] = "/.crosspoint";
 constexpr BookCacheKind BOOK_CACHE_KINDS[] = {BookCacheKind::Epub, BookCacheKind::Txt, BookCacheKind::Xtc};
+
+// download.id: magic, blob SHA, blob size (little-endian), CRC-32 of the bytes before it.
+constexpr uint8_t HELD_ID_MAGIC[4] = {'G', 'S', 'D', '1'};
+constexpr size_t HELD_ID_SHA_AT = sizeof(HELD_ID_MAGIC);
+constexpr size_t HELD_ID_SIZE_AT = HELD_ID_SHA_AT + GitBlobHasher::SHA_SIZE;
+constexpr size_t HELD_ID_CRC_AT = HELD_ID_SIZE_AT + sizeof(uint64_t);
+constexpr size_t HELD_ID_BYTES = HELD_ID_CRC_AT + sizeof(uint32_t);
+
+void putLe(uint8_t* out, uint64_t value, size_t bytes) {
+  for (size_t i = 0; i < bytes; ++i) out[i] = static_cast<uint8_t>(value >> (8 * i));
+}
+
+uint64_t getLe(const uint8_t* in, size_t bytes) {
+  uint64_t value = 0;
+  for (size_t i = 0; i < bytes; ++i) value |= static_cast<uint64_t>(in[i]) << (8 * i);
+  return value;
+}
 
 // An empty buffer names no path; any other must be syncable once its leading '/' is dropped.
 bool isSyncable(const char* absPath) { return absPath[0] == '\0' || isSyncablePath(absPath + 1, strlen(absPath + 1)); }
@@ -61,11 +79,8 @@ SyncRunResult SyncExecutor::prepare() {
     result.status = SyncRunStatus::StorageError;
     return result;
   }
-  if (storage.exists(SYNC_DOWNLOAD_TMP_PATH) && !storage.remove(SYNC_DOWNLOAD_TMP_PATH)) {
-    LOG_ERR(LOG_TAG, "Cannot remove %s", SYNC_DOWNLOAD_TMP_PATH);
-    result.status = SyncRunStatus::StorageError;
-    return result;
-  }
+  result.status = checkHeldDownload();
+  if (result.status != SyncRunStatus::Ok) return result;
   result.status = recoverManifest();
   bool needsCompaction = false;
   if (result.status == SyncRunStatus::Ok) result.status = checkManifest(needsCompaction);
@@ -80,6 +95,74 @@ SyncRunResult SyncExecutor::prepare() {
   }
   prepared = result.status == SyncRunStatus::Ok;
   return result;
+}
+
+// Keeps download.tmp only beside the id of a blob it can still be the start of.
+SyncRunStatus SyncExecutor::checkHeldDownload() {
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  uint64_t size = 0;
+  uint64_t held = 0;
+  if (readHeldId(sha, size) && storage.fileSize(SYNC_DOWNLOAD_TMP_PATH, held) && held <= size) {
+    return SyncRunStatus::Ok;
+  }
+  return removeHeldDownload() ? SyncRunStatus::Ok : SyncRunStatus::StorageError;
+}
+
+bool SyncExecutor::removeHeldDownload() {
+  for (const char* path : {SYNC_DOWNLOAD_TMP_PATH, SYNC_DOWNLOAD_ID_PATH}) {
+    if (storage.exists(path) && !storage.remove(path)) {
+      LOG_ERR(LOG_TAG, "Cannot remove %s", path);
+      return false;
+    }
+  }
+  return true;
+}
+
+bool SyncExecutor::readHeldId(uint8_t sha[GitBlobHasher::SHA_SIZE], uint64_t& size) {
+  OpenFile file(storage, SYNC_DOWNLOAD_ID_PATH, SyncOpenMode::Read);
+  if (!file.get()) return false;
+  uint8_t id[HELD_ID_BYTES + 1];
+  if (file.get()->read(id, sizeof(id)) != static_cast<int>(HELD_ID_BYTES)) return false;
+  if (memcmp(id, HELD_ID_MAGIC, sizeof(HELD_ID_MAGIC)) != 0 ||
+      getLe(id + HELD_ID_CRC_AT, sizeof(uint32_t)) != Crc32::compute(id, HELD_ID_CRC_AT)) {
+    return false;
+  }
+  memcpy(sha, id + HELD_ID_SHA_AT, GitBlobHasher::SHA_SIZE);
+  size = getLe(id + HELD_ID_SIZE_AT, sizeof(uint64_t));
+  return true;
+}
+
+// The bytes download.tmp holds of the tree entry, already fed to the hasher; 0 when it holds none of it.
+uint64_t SyncExecutor::heldBytes() {
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  uint64_t size = 0;
+  uint64_t held = 0;
+  if (!callbacks.hashPrefix || !readHeldId(sha, size) || size != entrySize ||
+      memcmp(sha, entrySha, sizeof(sha)) != 0 || !storage.fileSize(SYNC_DOWNLOAD_TMP_PATH, held) || held == 0 ||
+      held > entrySize) {
+    return 0;
+  }
+  OpenFile file(storage, SYNC_DOWNLOAD_TMP_PATH, SyncOpenMode::Read);
+  if (!file.get() || !callbacks.hashPrefix(callbacks.ctx, *file.get(), held, hasher)) {
+    LOG_ERR(LOG_TAG, "Cannot reread the %lu bytes held of %s", static_cast<unsigned long>(held), treePath);
+    hasher.begin(entrySize);
+    return 0;
+  }
+  LOG_INF(LOG_TAG, "Resuming %s at byte %lu", treePath, static_cast<unsigned long>(held));
+  return held;
+}
+
+// Empties download.tmp and names the tree entry as what it holds; the old bytes go before the new id lands.
+bool SyncExecutor::startTemp() {
+  if (!removeHeldDownload()) return false;
+  if (entrySize == 0) return true;
+  uint8_t id[HELD_ID_BYTES];
+  memcpy(id, HELD_ID_MAGIC, sizeof(HELD_ID_MAGIC));
+  memcpy(id + HELD_ID_SHA_AT, entrySha, GitBlobHasher::SHA_SIZE);
+  putLe(id + HELD_ID_SIZE_AT, entrySize, sizeof(uint64_t));
+  putLe(id + HELD_ID_CRC_AT, Crc32::compute(id, HELD_ID_CRC_AT), sizeof(uint32_t));
+  OpenFile file(storage, SYNC_DOWNLOAD_ID_PATH, SyncOpenMode::Truncate);
+  return file.get() && file.get()->write(id, sizeof(id)) && file.get()->flush();
 }
 
 SyncRunStatus SyncExecutor::recoverManifest() {
@@ -511,6 +594,7 @@ SyncOpOutcome SyncExecutor::land(uint32_t replaces) {
     if (!storage.remove(treePath)) return fatal("Cannot remove", treePath);
   }
   if (!storage.rename(SYNC_DOWNLOAD_TMP_PATH, treePath)) return dropTemp(SyncOpOutcome::TargetUnwritable);
+  if (!removeHeldDownload()) return fatal("Cannot remove", SYNC_DOWNLOAD_ID_PATH);
   return SyncOpOutcome::Applied;
 }
 
@@ -574,17 +658,19 @@ bool SyncExecutor::matchesTree() {
   return callbacks.hashFile(callbacks.ctx, treePath, entrySize, sha) && memcmp(sha, entrySha, sizeof(sha)) == 0;
 }
 
-// Streams the tree entry into the download temp, hashing as it goes; Applied once it is verified.
+// Streams the tree entry into the download temp, after the bytes a previous run left there, hashing as it goes;
+// Applied once it is verified. A failed transfer keeps what arrived for the next attempt.
 SyncOpOutcome SyncExecutor::fetchIntoTemp() {
-  tempFile = storage.open(SYNC_DOWNLOAD_TMP_PATH, SyncOpenMode::Truncate);
-  if (!tempFile) return fatal("Cannot open", SYNC_DOWNLOAD_TMP_PATH);
   hasher.begin(entrySize);
-  fetched = 0;
+  fetched = heldBytes();
+  if (fetched == 0 && !startTemp()) return fatal("Cannot start", SYNC_DOWNLOAD_TMP_PATH);
+  tempFile = storage.open(SYNC_DOWNLOAD_TMP_PATH, fetched > 0 ? SyncOpenMode::Append : SyncOpenMode::Truncate);
+  if (!tempFile) return fatal("Cannot open", SYNC_DOWNLOAD_TMP_PATH);
   tempWriteFailed = false;
   overflow = false;
   bool bodyOk = true;
-  if (entrySize > 0) {
-    const SyncFetchRequest request{entrySha, entrySize, treePath + 1};
+  if (entrySize > fetched) {
+    const SyncFetchRequest request{entrySha, entrySize, treePath + 1, fetched};
     const SyncChunkSink chunkSink{this, &sinkWrite};
     bodyOk = callbacks.fetch && callbacks.fetch(callbacks.ctx, request, chunkSink);
   }
@@ -595,8 +681,8 @@ SyncOpOutcome SyncExecutor::fetchIntoTemp() {
   uint8_t sha[GitBlobHasher::SHA_SIZE];
   const bool sized = hasher.finish(sha);
   if (!bodyOk && !overflow) {
-    LOG_ERR(LOG_TAG, "Fetch failed: %s", treePath);
-    return dropTemp(SyncOpOutcome::FetchFailed);
+    LOG_ERR(LOG_TAG, "Fetch failed: %s, %lu bytes held", treePath, static_cast<unsigned long>(fetched));
+    return fetched > 0 ? fileError(SyncOpOutcome::FetchFailed) : dropTemp(SyncOpOutcome::FetchFailed);
   }
   if (overflow || !sized || memcmp(sha, entrySha, sizeof(sha)) != 0) {
     LOG_ERR(LOG_TAG, "Verification failed: %s", treePath);
@@ -623,9 +709,7 @@ bool SyncExecutor::sinkWrite(void* ctx, const uint8_t* data, size_t len) {
 
 // Abandons the operation as a per-file error; the temp must go, or the card is failing.
 SyncOpOutcome SyncExecutor::dropTemp(SyncOpOutcome outcome) {
-  if (storage.exists(SYNC_DOWNLOAD_TMP_PATH) && !storage.remove(SYNC_DOWNLOAD_TMP_PATH)) {
-    return fatal("Cannot remove", SYNC_DOWNLOAD_TMP_PATH);
-  }
+  if (!removeHeldDownload()) return fatal("Cannot remove", SYNC_DOWNLOAD_TMP_PATH);
   return fileError(outcome);
 }
 

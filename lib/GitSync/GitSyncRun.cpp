@@ -46,7 +46,7 @@ class SyncRun {
   GitSyncError execute(GitSyncReport& report) {
     executor = makeUniqueNoThrow<SyncExecutor>(
         storage, SyncExecutorCallbacks{this, &fetch, &hashFile, hooks.clearBookCache ? &clearBookCache : nullptr,
-                                       hooks.bookMoved ? &bookMoved : nullptr, &onOperation});
+                                       hooks.bookMoved ? &bookMoved : nullptr, &onOperation, &hashPrefix});
     if (!executor) return outOfMemory("executor", sizeof(SyncExecutor));
     hashBuffer = makeUniqueNoThrow<uint8_t[]>(GIT_SYNC_HASH_BUFFER_BYTES);
     if (!hashBuffer) return outOfMemory("hash buffer", GIT_SYNC_HASH_BUFFER_BYTES);
@@ -208,14 +208,25 @@ class SyncRun {
       return false;
     }
     self->blobSink = sink;
-    const GitFetchStatus fetched =
-        self->transport.fetchBlob(self->transport.ctx, request, SyncChunkSink{self, &blobChunk});
+    self->blobDelivered = request.offset;
+    SyncFetchRequest attempt = request;
+    GitFetchStatus fetched;
+    for (uint8_t resumes = 0;; ++resumes) {
+      const uint64_t from = self->blobDelivered;
+      fetched = self->fetchBlobFrom(attempt, from);
+      // Only a transfer that moved forward earns a resume: a dead network fails as fast as before.
+      if (fetched != GitFetchStatus::NetworkError || self->blobDelivered == from || resumes == MAX_BLOB_RESUMES) {
+        break;
+      }
+      LOG_INF(LOG_TAG, "Resuming %s at byte %lu", request.repoPath, static_cast<unsigned long>(self->blobDelivered));
+    }
     switch (fetched) {
       case GitFetchStatus::Ok:
         self->networkErrors = 0;
         return true;
       case GitFetchStatus::Failed:
       case GitFetchStatus::Aborted:
+      case GitFetchStatus::RangeRefused:
         return false;
       case GitFetchStatus::NetworkError:
         if (++self->networkErrors >= MAX_CONSECUTIVE_FETCH_FAILURES) {
@@ -231,6 +242,20 @@ class SyncRun {
     return false;
   }
 
+  // A server that cannot start at from serves the whole blob instead, and the bytes before from are dropped.
+  GitFetchStatus fetchBlobFrom(SyncFetchRequest& attempt, uint64_t from) {
+    attempt.offset = from;
+    const GitFetchStatus fetched = transport.fetchBlob(transport.ctx, attempt, SyncChunkSink{this, &blobChunk});
+    if (fetched != GitFetchStatus::RangeRefused || from == 0) return fetched;
+    LOG_INF(LOG_TAG, "Range refused for %s: fetching it whole, skipping %lu bytes", attempt.repoPath,
+            static_cast<unsigned long>(from));
+    attempt.offset = 0;
+    blobSkip = from;
+    const GitFetchStatus whole = transport.fetchBlob(transport.ctx, attempt, SyncChunkSink{this, &blobChunk});
+    blobSkip = 0;
+    return whole;
+  }
+
   // Every later file would fail the same way. RedirectRefused outranks TooManyFetchFailures.
   void stop(GitSyncError reason) {
     if (stopReason != GitSyncError::RedirectRefused) stopReason = reason;
@@ -239,7 +264,18 @@ class SyncRun {
 
   static bool blobChunk(void* ctx, const uint8_t* data, size_t len) {
     auto* self = static_cast<SyncRun*>(ctx);
+    if (self->blobSkip > 0) {
+      const size_t dropped = len < self->blobSkip ? len : static_cast<size_t>(self->blobSkip);
+      self->blobSkip -= dropped;
+      data += dropped;
+      len -= dropped;
+      if (len == 0) {
+        self->notify(true);
+        return true;
+      }
+    }
     const bool written = self->blobSink.write(self->blobSink.ctx, data, len);
+    if (written) self->blobDelivered += len;
     self->notify(true);
     return written;
   }
@@ -255,6 +291,21 @@ class SyncRun {
     return hashed;
   }
 
+  // Rereads the bytes an interrupted download left, through the hash buffer, ticking like an adoption hash.
+  static bool hashPrefix(void* ctx, SyncFile& file, uint64_t length, GitBlobHasher& hasher) {
+    auto* self = static_cast<SyncRun*>(ctx);
+    while (length > 0) {
+      const size_t want =
+          length < GIT_SYNC_HASH_BUFFER_BYTES ? static_cast<size_t>(length) : GIT_SYNC_HASH_BUFFER_BYTES;
+      const int got = file.read(self->hashBuffer.get(), want);
+      if (got <= 0) return false;
+      hasher.update(self->hashBuffer.get(), static_cast<size_t>(got));
+      length -= static_cast<uint64_t>(got);
+      self->notify(true);
+    }
+    return true;
+  }
+
   SyncStorage& storage;
   const GitSyncTransport transport;
   const GitSyncHooks hooks;
@@ -265,6 +316,10 @@ class SyncRun {
   std::unique_ptr<SyncExecutor> executor;
   TreeSnapshotWriter* treeWriter = nullptr;
   SyncChunkSink blobSink{nullptr, nullptr};
+  // Bytes of the blob in flight the executor holds: the offset a resumed transfer starts at.
+  uint64_t blobDelivered = 0;
+  // Bytes of a whole-blob fallback still to drop before the sink sees any.
+  uint64_t blobSkip = 0;
   bool cancelLatched = false;
   // A network condition that stops the run; it outranks the user's cancel.
   GitSyncError stopReason = GitSyncError::Ok;

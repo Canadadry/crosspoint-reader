@@ -9,6 +9,7 @@
 #include <functional>
 #include <string>
 
+#include "util/HttpRange.h"
 #include "util/UrlOrigin.h"
 
 #if defined(FREEINK_NET_WOLFSSL)
@@ -102,11 +103,31 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
       http.addHeader("Authorization", std::string("Basic ") + encoded.c_str());
     }
     if (hasExtraHeader(sink.options)) http.addHeader(sink.options.headerName, sink.options.headerValue);
+    const uint64_t rangeStart = sink.options.rangeStart;
+    if (rangeStart > 0) {
+      char range[HTTP_RANGE_HEADER_CAPACITY];
+      formatRangeHeader(range, sizeof(range), rangeStart);
+      http.addHeader("Range", range);
+    }
 
     LOG_DBG("HTTP", "wolfSSL GET: %s", url.c_str());
+    // A ranged request whose answer is not the asked range stops before its first body byte. The headers are
+    // checked once, on the first chunk, not on every chunk.
+    bool rangeRefused = false;
+    bool rangeAccepted = false;
     const int status = http.GET(
-        [&http, &sink](const uint8_t* data, size_t len) {
-          if (http.getStatus() != 200) return true;
+        [&http, &sink, rangeStart, &rangeRefused, &rangeAccepted](const uint8_t* data, size_t len) {
+          const int code = http.getStatus();
+          if (rangeStart > 0 && !rangeAccepted) {
+            if (isRedirect(code) || code >= 500) return true;
+            if (code != 206 || !contentRangeStartsAt(http.getHeader("content-range").c_str(), rangeStart)) {
+              rangeRefused = true;
+              return false;
+            }
+            rangeAccepted = true;
+          } else if (rangeStart == 0 && code != 200) {
+            return true;
+          }
           if (sink.total == 0 && http.hasContentLength()) sink.total = http.getContentLength();
           if (!sink.write(data, len)) return false;
           sink.downloaded += len;
@@ -116,6 +137,11 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
         [&sink]() { return sink.cancelFlag && *sink.cancelFlag; });
 
     if (http.aborted()) return HttpDownloader::ABORTED;
+    if (rangeRefused) {
+      LOG_ERR("HTTP", "wolfSSL range refused: status %d, content-range '%s'", http.getStatus(),
+              http.getHeader("content-range").c_str());
+      return HttpDownloader::RANGE_REFUSED;
+    }
     if (status < 0) {
       LOG_ERR("HTTP", "wolfSSL request failed: %s", url.c_str());
       return HttpDownloader::HTTP_ERROR;
@@ -135,7 +161,13 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
       }
       continue;
     }
-    if (status != 200) {
+    // A ranged answer without a body never reached the check in the callback; a server error stays retryable.
+    if (rangeStart > 0 && status < 500 &&
+        (status != 206 || !contentRangeStartsAt(http.getHeader("content-range").c_str(), rangeStart))) {
+      LOG_ERR("HTTP", "wolfSSL range refused: status %d", status);
+      return HttpDownloader::RANGE_REFUSED;
+    }
+    if (status != (rangeStart > 0 ? 206 : 200)) {
       LOG_ERR("HTTP", "wolfSSL unexpected status: %d", status);
       return HttpDownloader::HTTP_ERROR;
     }
@@ -159,6 +191,11 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
 // large/slow files and surfaces a short read directly.
 HttpDownloader::DownloadError runGet(const std::string& url, const std::string& username, const std::string& password,
                                      Sink& sink) {
+  // esp_http_client exposes no response header getter here, so a Content-Range cannot be checked.
+  if (sink.options.rangeStart > 0) {
+    LOG_ERR("HTTP", "ranged requests need the wolfSSL client");
+    return HttpDownloader::RANGE_REFUSED;
+  }
   WifiPowerSaveGuard psGuard;
   esp_http_client_config_t config = {};
   config.url = url.c_str();
