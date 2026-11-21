@@ -137,9 +137,8 @@ uint64_t SyncExecutor::heldBytes() {
   uint8_t sha[GitBlobHasher::SHA_SIZE];
   uint64_t size = 0;
   uint64_t held = 0;
-  if (!callbacks.hashPrefix || !readHeldId(sha, size) || size != entrySize ||
-      memcmp(sha, entrySha, sizeof(sha)) != 0 || !storage.fileSize(SYNC_DOWNLOAD_TMP_PATH, held) || held == 0 ||
-      held > entrySize) {
+  if (!callbacks.hashPrefix || !readHeldId(sha, size) || size != entrySize || memcmp(sha, entrySha, sizeof(sha)) != 0 ||
+      !storage.fileSize(SYNC_DOWNLOAD_TMP_PATH, held) || held == 0 || held > entrySize) {
     return 0;
   }
   OpenFile file(storage, SYNC_DOWNLOAD_TMP_PATH, SyncOpenMode::Read);

@@ -53,8 +53,8 @@ bool formatRawUrl(char* out, size_t capacity, const GitSyncConfig& config, const
       repoPath[0] == '\0') {
     return finishUrl(out, capacity, -1);
   }
-  const int written = snprintf(out, capacity, "https://raw.githubusercontent.com/%s/%s/%s/", config.owner,
-                               config.repo, config.branch);
+  const int written =
+      snprintf(out, capacity, "https://raw.githubusercontent.com/%s/%s/%s/", config.owner, config.repo, config.branch);
   if (!finishUrl(out, capacity, written)) return false;
   static constexpr char HEX[] = "0123456789ABCDEF";
   size_t at = static_cast<size_t>(written);
