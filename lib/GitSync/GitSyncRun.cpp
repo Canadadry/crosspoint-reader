@@ -75,7 +75,11 @@ class SyncRun {
     enterPhase(GitSyncPhase::Planning);
     auto planner = makeUniqueNoThrow<SyncPlanner>();
     if (!planner) return outOfMemory("planner", sizeof(SyncPlanner));
-    result = executor->apply(*planner);
+    result = executor->planInto(*planner);
+    if (result.status != SyncRunStatus::Ok) return runError(result.status);
+    // The planner's slots are the run's largest block; the downloads' TLS sessions need it back.
+    planner.reset();
+    result = executor->runPlanned();
     return runError(result.status);
   }
 

@@ -124,9 +124,13 @@ class SyncExecutor {
   // and compacts the manifest's journal. Call before the planner exists.
   SyncRunResult prepare();
 
-  // begin(), the planner's plan over the manifest and tree.tmp through sink(), then end(). Call after a
-  // successful prepare(), once tree.tmp is written.
+  // planInto() then runPlanned(). Call after a successful prepare(), once tree.tmp is written.
   SyncRunResult apply(SyncPlanner& planner);
+  // begin(), then the planner's operations written to ops.tmp. Ok means the planner may be freed and runPlanned()
+  // called; any other status already ended the run.
+  SyncRunResult planInto(SyncPlanner& planner);
+  // Runs the operations of ops.tmp through sink(), then end(); ops.tmp is gone when it returns.
+  SyncRunResult runPlanned();
 
   // Opens the manifest and the tree for operations; false with the reason in end()'s result.
   bool begin();
@@ -182,6 +186,9 @@ class SyncExecutor {
   static bool sinkOp(void* ctx, const SyncOp& op);
   static void sinkTotal(void* ctx, uint32_t totalOps);
   static bool sinkWrite(void* ctx, const uint8_t* data, size_t len);
+  static bool spoolOp(void* ctx, const SyncOp& op);
+  static void spoolTotal(void* ctx, uint32_t totalOps);
+  SyncRunResult planFailure(const SyncPlanResult& planned);
 
   SyncStorage& storage;
   SyncExecutorCallbacks callbacks;
@@ -189,6 +196,9 @@ class SyncExecutor {
   SyncFile* manifestFile = nullptr;
   SyncFile* treeFile = nullptr;
   SyncFile* tempFile = nullptr;
+  // ops.tmp while the planner writes it; the temp's slot, free until the first operation runs.
+  SyncFile* opsFile = nullptr;
+  uint32_t plannedOps = 0;
   std::optional<RecordReader> manifestReader;
   std::optional<RecordReader> treeReader;
   std::optional<RecordWriter> journal;

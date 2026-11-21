@@ -81,6 +81,11 @@ SyncRunResult SyncExecutor::prepare() {
   }
   result.status = checkHeldDownload();
   if (result.status != SyncRunStatus::Ok) return result;
+  if (storage.exists(SYNC_OPS_PATH) && !storage.remove(SYNC_OPS_PATH)) {
+    LOG_ERR(LOG_TAG, "Cannot remove %s", SYNC_OPS_PATH);
+    result.status = SyncRunStatus::StorageError;
+    return result;
+  }
   result.status = recoverManifest();
   bool needsCompaction = false;
   if (result.status == SyncRunStatus::Ok) result.status = checkManifest(needsCompaction);
@@ -325,8 +330,120 @@ bool SyncExecutor::begin() {
 }
 
 SyncRunResult SyncExecutor::apply(SyncPlanner& planner) {
+  const SyncRunResult spooled = planInto(planner);
+  if (spooled.status != SyncRunStatus::Ok) return spooled;
+  return runPlanned();
+}
+
+// One operation in ops.tmp: kind, reason, sourceExists, targetExists, manifestOffset and treeOffset little-endian.
+namespace {
+constexpr size_t OP_RECORD_BYTES = 12;
+constexpr size_t OPS_PER_READ = 16;
+
+void encodeOp(const SyncOp& op, uint8_t out[OP_RECORD_BYTES]) {
+  out[0] = static_cast<uint8_t>(op.kind);
+  out[1] = static_cast<uint8_t>(op.reason);
+  out[2] = op.sourceExists ? 1 : 0;
+  out[3] = op.targetExists ? 1 : 0;
+  for (size_t i = 0; i < 4; ++i) {
+    out[4 + i] = static_cast<uint8_t>(op.manifestOffset >> (8 * i));
+    out[8 + i] = static_cast<uint8_t>(op.treeOffset >> (8 * i));
+  }
+}
+
+SyncOp decodeOp(const uint8_t in[OP_RECORD_BYTES]) {
+  SyncOp op{static_cast<SyncOpKind>(in[0]), static_cast<SyncSkipReason>(in[1]), in[2] != 0, in[3] != 0, 0, 0};
+  for (size_t i = 0; i < 4; ++i) {
+    op.manifestOffset |= static_cast<uint32_t>(in[4 + i]) << (8 * i);
+    op.treeOffset |= static_cast<uint32_t>(in[8 + i]) << (8 * i);
+  }
+  return op;
+}
+}  // namespace
+
+SyncRunResult SyncExecutor::planInto(SyncPlanner& planner) {
   if (!begin()) return result;
-  const SyncPlanResult planned = planner.plan(*manifestFile, *treeFile, &localExists, this, sink());
+  plannedOps = 0;
+  const SyncPlanResult plan =
+      planner.plan(*manifestFile, *treeFile, &localExists, this, SyncOpSink{this, &spoolOp, &spoolTotal});
+  bool flushed = true;
+  if (opsFile) {
+    flushed = opsFile->flush();
+    storage.close(opsFile);
+    opsFile = nullptr;
+  }
+  if (plan.status != SyncPlanStatus::Ok || !flushed || failed) {
+    if (!flushed) {
+      LOG_ERR(LOG_TAG, "Cannot flush %s", SYNC_OPS_PATH);
+      failed = true;
+    }
+    SyncRunResult run = planFailure(plan);
+    if (storage.exists(SYNC_OPS_PATH)) storage.remove(SYNC_OPS_PATH);
+    return run;
+  }
+  SyncRunResult ok = result;
+  ok.recordStatus = plan.readerStatus;
+  return ok;
+}
+
+bool SyncExecutor::spoolOp(void* ctx, const SyncOp& op) {
+  auto* self = static_cast<SyncExecutor*>(ctx);
+  // Opened on the first operation, so a plan that fails or finds nothing to do writes nothing.
+  if (!self->opsFile) self->opsFile = self->storage.open(SYNC_OPS_PATH, SyncOpenMode::Truncate);
+  uint8_t record[OP_RECORD_BYTES];
+  encodeOp(op, record);
+  if (!self->opsFile || !self->opsFile->write(record, sizeof(record))) {
+    LOG_ERR(LOG_TAG, "Cannot write %s", SYNC_OPS_PATH);
+    self->failed = true;
+    return false;
+  }
+  ++self->plannedOps;
+  return true;
+}
+
+void SyncExecutor::spoolTotal(void* ctx, uint32_t totalOps) { static_cast<SyncExecutor*>(ctx)->total = totalOps; }
+
+// Reads ops.tmp a few records at a time, so the temp's slot is free whenever an operation runs.
+SyncRunResult SyncExecutor::runPlanned() {
+  if (!manifestFile) {
+    LOG_ERR(LOG_TAG, "runPlanned() without planInto()");
+    result.status = SyncRunStatus::NotPrepared;
+    return result;
+  }
+  const SyncOpSink run = sink();
+  uint8_t records[OPS_PER_READ * OP_RECORD_BYTES];
+  for (uint32_t next = 0; next < plannedOps;) {
+    int got;
+    {
+      OpenFile file(storage, SYNC_OPS_PATH, SyncOpenMode::Read);
+      if (!file.get() || !file.get()->seek(next * OP_RECORD_BYTES)) {
+        LOG_ERR(LOG_TAG, "Cannot read %s", SYNC_OPS_PATH);
+        failed = true;
+        break;
+      }
+      got = file.get()->read(records, sizeof(records));
+    }
+    if (got <= 0 || got % OP_RECORD_BYTES != 0) {
+      LOG_ERR(LOG_TAG, "Short read of %s at operation %u", SYNC_OPS_PATH, static_cast<unsigned>(next));
+      failed = true;
+      break;
+    }
+    bool stopped = false;
+    for (int at = 0; at < got && !stopped; at += OP_RECORD_BYTES, ++next) {
+      stopped = !run.onOp(run.ctx, decodeOp(records + at));
+    }
+    if (stopped) break;
+  }
+  SyncRunResult ended = end();
+  if (storage.exists(SYNC_OPS_PATH) && !storage.remove(SYNC_OPS_PATH)) {
+    LOG_ERR(LOG_TAG, "Cannot remove %s", SYNC_OPS_PATH);
+    if (ended.status == SyncRunStatus::Ok) ended.status = SyncRunStatus::StorageError;
+  }
+  return ended;
+}
+
+// Ends the run of a plan that did not complete and maps its status.
+SyncRunResult SyncExecutor::planFailure(const SyncPlanResult& planned) {
   SyncRunResult run = end();
   if (run.status != SyncRunStatus::Ok) return run;
   run.recordStatus = planned.readerStatus;
@@ -394,7 +511,7 @@ void SyncExecutor::closeFiles() {
   manifestReader.reset();
   treeReader.reset();
   journal.reset();
-  for (SyncFile** file : {&tempFile, &treeFile, &manifestFile}) {
+  for (SyncFile** file : {&opsFile, &tempFile, &treeFile, &manifestFile}) {
     if (*file) storage.close(*file);
     *file = nullptr;
   }

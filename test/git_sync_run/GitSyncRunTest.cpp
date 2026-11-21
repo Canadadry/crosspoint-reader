@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <deque>
 #include <functional>
 #include <map>
@@ -20,12 +21,30 @@
 // makeUniqueNoThrow goes through the nothrow forms; an allocation of failNothrowSize bytes fails.
 namespace {
 size_t failNothrowSize = 0;
+// The planner the run holds, tracked through its allocation, so a test can tell whether it is alive.
+void* livePlanner = nullptr;
 }  // namespace
+
+// Replaced with its matching delete below, so every block comes from malloc and goes back to free.
+void* operator new(std::size_t size) {
+  void* p = std::malloc(size == 0 ? 1 : size);
+  if (p == nullptr) std::abort();
+  return p;
+}
 
 void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
   if (failNothrowSize != 0 && size == failNothrowSize) return nullptr;
-  return ::operator new(size);
+  void* p = ::operator new(size);
+  if (size == sizeof(SyncPlanner)) livePlanner = p;
+  return p;
 }
+
+void operator delete(void* p) noexcept {
+  if (p != nullptr && p == livePlanner) livePlanner = nullptr;
+  std::free(p);
+}
+
+void operator delete(void* p, std::size_t) noexcept { ::operator delete(p); }
 
 void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
   if (failNothrowSize != 0 && size == failNothrowSize) return nullptr;
@@ -209,6 +228,7 @@ class GitSyncRunTest : public ::testing::Test {
       if (scripted != GitFetchStatus::Ok) return scripted;
     }
     self->blobOffsets.push_back(request.offset);
+    if (livePlanner != nullptr) self->plannerAliveDuringAFetch = true;
     if (self->refuseRanges && request.offset > 0) return GitFetchStatus::RangeRefused;
     if (self->failRanges && request.offset > 0) return GitFetchStatus::NetworkError;
     const auto it = self->blobs.find(key);
@@ -295,6 +315,7 @@ class GitSyncRunTest : public ::testing::Test {
   std::deque<size_t> blobDrops;
   std::vector<uint64_t> blobOffsets;
   size_t blobBytesServed = 0;
+  bool plannerAliveDuringAFetch = false;
   // Answers RangeRefused to every fetch that does not start at byte 0.
   bool refuseRanges = false;
   // Answers NetworkError, without a byte, to every fetch that does not start at byte 0.
@@ -318,6 +339,15 @@ TEST_F(GitSyncRunTest, FirstSyncMirrorsTheRepository) {
   EXPECT_EQ(report.run.fileErrors, 0u);
   EXPECT_EQ(bookFiles(storage), fixtureFiles());
   EXPECT_EQ(liveEntries(storage).size(), 5u);
+}
+
+TEST_F(GitSyncRunTest, ThePlannerIsFreedBeforeTheFirstBlobIsFetched) {
+  const GitSyncReport report = run();
+
+  EXPECT_EQ(report.error, GitSyncError::Ok);
+  EXPECT_FALSE(blobOffsets.empty());
+  EXPECT_FALSE(plannerAliveDuringAFetch);
+  EXPECT_FALSE(storage.exists(SYNC_OPS_PATH));
 }
 
 TEST_F(GitSyncRunTest, SecondSyncFetchesNothingAndChangesNothing) {

@@ -457,3 +457,20 @@ Rules:
 - Landing the file, or a failed verification, removes both.
 
 Any change to this layout changes the magic.
+
+## GitHub sync planned operations (`ops.tmp`)
+
+`/.crosspoint/gitsync/ops.tmp` holds the planner's operations, so the planner
+(about 49 KB) is freed before the first download and the TLS sessions get that
+memory back. Written by `SyncExecutor::planInto()` only when the plan has at
+least one operation, read back 16 records at a time by `runPlanned()`, removed
+when the run ends and by `prepare()`. 12 bytes per operation, little-endian:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | `SyncOpKind` |
+| 1 | 1 | `SyncSkipReason` |
+| 2 | 1 | source exists (0 or 1) |
+| 3 | 1 | target exists (0 or 1) |
+| 4 | 4 | manifest offset, u32 |
+| 8 | 4 | tree offset, u32 |

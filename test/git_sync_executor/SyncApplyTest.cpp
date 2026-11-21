@@ -316,7 +316,8 @@ TEST_F(SyncApplyTest, FirstSyncAtTheCapAdoptsEverythingWithLinearManifestWrites)
   EXPECT_EQ(first.adopted, MAX_SYNC_FILES);
   EXPECT_EQ(first.fileErrors, 0u);
   EXPECT_TRUE(fetches.empty());
-  EXPECT_LE(firstBytes, EMPTY_MANIFEST_SIZE + entryFrames + 1024);
+  // Plus the planned operations, 12 bytes each in ops.tmp.
+  EXPECT_LE(firstBytes, EMPTY_MANIFEST_SIZE + entryFrames + 12u * MAX_SYNC_FILES + 1024);
 
   storage.resetCounters();
   progress.clear();
