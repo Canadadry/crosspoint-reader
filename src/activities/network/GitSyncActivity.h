@@ -8,6 +8,7 @@
 
 #include "activities/Activity.h"
 #include "components/themes/BaseTheme.h"
+#include "network/GitSyncEngine.h"
 
 // Update screen: loads /.crosspoint/github-sync.json, brings Wi-Fi up as the OPDS browser does, runs one GitHub
 // sync from loop() and reports it. Leaving with Wi-Fi on restarts silently to home.
@@ -55,6 +56,8 @@ class GitSyncActivity final : public Activity {
   // Read by the render task; written under the render lock.
   ProgressSnapshot shown{};
   GitSyncReport report{};
+  // Written with report, under the render lock.
+  git_sync_engine::Diagnostics diagnostics{};
   bool cancelRequested = false;
   bool goHomeAfterRun = false;
   uint32_t lowestFreeHeap = 0;

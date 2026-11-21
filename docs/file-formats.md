@@ -428,3 +428,49 @@ makes the manifest corrupt.
 A file with the right magic and another version is reported as a wrong
 version, before anything else is read. Any change to this layout bumps
 `RECORD_FILE_VERSION` in `lib/GitSync/RecordFormat.h`.
+
+## GitHub sync interrupted download (`download.tmp`, `download.id`)
+
+### Version 1
+
+`/.crosspoint/gitsync/download.tmp` holds the first bytes of the blob being
+downloaded, and `/.crosspoint/gitsync/download.id` names that blob, so a
+download cut off by the network, a cancel or a power loss resumes where it
+stopped instead of starting over. Written and read by `SyncExecutor`
+(`lib/GitSync/`), little-endian, 36 bytes:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | magic `GSD1` |
+| 4 | 20 | blob SHA-1, as in the tree |
+| 24 | 8 | blob size, u64 |
+| 32 | 4 | CRC-32 (IEEE 802.3) over bytes 0 to 31 |
+
+Rules:
+
+- A new download removes both files, writes the id, then the bytes.
+- A download of the blob the id names rereads `download.tmp` into the hasher
+  and fetches only the rest, with an HTTP `Range` request; the whole file is
+  still checked against the blob SHA before it lands.
+- `prepare()` keeps the pair only when the id is valid and `download.tmp` is no
+  longer than the size it names; otherwise both are removed.
+- Landing the file, or a failed verification, removes both.
+
+Any change to this layout changes the magic.
+
+## GitHub sync planned operations (`ops.tmp`)
+
+`/.crosspoint/gitsync/ops.tmp` holds the planner's operations, so the planner
+(about 49 KB) is freed before the first download and the TLS sessions get that
+memory back. Written by `SyncExecutor::planInto()` only when the plan has at
+least one operation, read back 16 records at a time by `runPlanned()`, removed
+when the run ends and by `prepare()`. 12 bytes per operation, little-endian:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | `SyncOpKind` |
+| 1 | 1 | `SyncSkipReason` |
+| 2 | 1 | source exists (0 or 1) |
+| 3 | 1 | target exists (0 or 1) |
+| 4 | 4 | manifest offset, u32 |
+| 8 | 4 | tree offset, u32 |

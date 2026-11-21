@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <GfxRenderer.h>
+#include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
 #include <WiFi.h>
@@ -19,9 +20,23 @@
 #include "fontIds.h"
 #include "network/GitSyncConfigLoader.h"
 #include "network/GitSyncEngine.h"
+#include "util/GitSyncErrorCode.h"
 #include "util/TaskWatchdog.h"
 
 namespace {
+
+// The last log lines of a sync that left a failure, readable on the device in the text reader.
+constexpr char SYNC_LOG_PATH[] = "/gitsync-log.txt";
+
+void saveSyncLog() {
+  const std::string logs = getLastLogs();
+  HalFile file;
+  if (!Storage.openFileForWrite("GSYNC", SYNC_LOG_PATH, file)) {
+    LOG_ERR("GSYNC", "Cannot write %s", SYNC_LOG_PATH);
+    return;
+  }
+  if (file.write(logs.data(), logs.size()) != logs.size()) LOG_ERR("GSYNC", "Short write to %s", SYNC_LOG_PATH);
+}
 
 // Volatile stores so the wipe of the token is not dropped as a dead store.
 void wipe(void* data, const size_t len) {
@@ -219,23 +234,28 @@ void GitSyncActivity::runSync() {
   }
   requestUpdateAndWait();
 
+  // The ring then holds this run only, for saveSyncLog().
+  clearLastLogs();
   lowestFreeHeap = ESP.getFreeHeap();
   LOG_INF("GSYNC", "Heap before sync: free %u, largest block %u", static_cast<unsigned>(lowestFreeHeap),
           static_cast<unsigned>(ESP.getMaxAllocHeap()));
   lastPublishMs = millis();
 
+  git_sync_engine::Diagnostics runDiagnostics;
   const GitSyncReport result =
-      git_sync_engine::run(config, GitSyncProgressSink{this, &GitSyncActivity::onSyncProgress});
+      git_sync_engine::run(config, GitSyncProgressSink{this, &GitSyncActivity::onSyncProgress}, &runDiagnostics);
   // No rerun from this activity, so the token is not needed any more.
   wipeConfig();
 
   LOG_INF("GSYNC", "Lowest free heap during sync: %u", static_cast<unsigned>(lowestFreeHeap));
   LOG_INF("GSYNC", "Loop task stack high-water mark: %u bytes",
           static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+  if (result.error != GitSyncError::Ok || result.run.fileErrors > 0) saveSyncLog();
 
   {
     RenderLock lock(*this);
     report = result;
+    diagnostics = runDiagnostics;
     state = State::Done;
   }
   if (goHomeAfterRun) {
@@ -407,6 +427,25 @@ void GitSyncActivity::renderDone(LineStack& lines) const {
   if (skipped != 0) {
     snprintf(line, sizeof(line), tr(STR_GIT_SYNC_SKIPPED_FORMAT), static_cast<unsigned>(skipped));
     drawLine(lines, line);
+  }
+  if (report.error != GitSyncError::Ok || run.fileErrors != 0) {
+    GitSyncCodeInputs in;
+    in.runError = static_cast<uint8_t>(report.error);
+    in.fileError = run.lastFileError;
+    in.fileHeld = run.lastFileHeld;
+    in.fileSize = run.lastFileSize;
+    in.apiError = diagnostics.api.error;
+    in.apiStatus = diagnostics.api.status;
+    in.rangedError = diagnostics.ranged.error;
+    in.rangedStatus = diagnostics.ranged.status;
+    in.lowestFreeHeap = lowestFreeHeap;
+    in.transferMinFreeHeap = diagnostics.transferMinFreeHeap;
+    in.transferMinLargestBlock = diagnostics.transferMinLargestBlock;
+    char code[GIT_SYNC_CODE_CAPACITY];
+    formatGitSyncCode(code, sizeof(code), in);
+    char codeLine[GIT_SYNC_CODE_CAPACITY + 16];
+    snprintf(codeLine, sizeof(codeLine), tr(STR_GIT_SYNC_CODE_FORMAT), code);
+    drawWrapped(lines, codeLine, 2);
   }
 }
 

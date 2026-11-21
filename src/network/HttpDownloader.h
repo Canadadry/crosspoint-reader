@@ -22,6 +22,8 @@ class HttpDownloader {
     FILE_ERROR,
     ABORTED,
     REDIRECT_REFUSED,
+    // A ranged request the server did not answer with a 206 starting at rangeStart; no body byte was delivered.
+    RANGE_REFUSED,
   };
 
   struct RequestOptions {
@@ -30,6 +32,10 @@ class HttpDownloader {
     const char* headerValue = nullptr;
     // With credentials set, refuse a redirect to another origin (scheme, host or port).
     bool refuseCrossOriginRedirect = false;
+    // Non-zero: ask for the body from this byte on, and accept only a 206 whose Content-Range starts there.
+    uint64_t rangeStart = 0;
+    // When set, receives the last response's HTTP status, or -1 when no status line was read.
+    int* statusOut = nullptr;
   };
 
   /**

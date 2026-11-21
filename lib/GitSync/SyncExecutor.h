@@ -42,6 +42,11 @@ struct SyncRunResult {
   uint32_t skippedUnsafeName = 0;
   // Operations abandoned with the manifest unchanged; the next run retries them.
   uint32_t fileErrors = 0;
+  // The last abandoned operation: its SyncOpOutcome (0 when none), the bytes of the blob held for the next run
+  // after a failed fetch, and the blob's size.
+  uint8_t lastFileError = 0;
+  uint64_t lastFileHeld = 0;
+  uint64_t lastFileSize = 0;
   // Reading state left in place because the destination already held its own.
   uint32_t stateConflicts = 0;
   // Directories removed because a sync emptied them.
@@ -61,10 +66,12 @@ enum class SyncOpOutcome : uint8_t {
 };
 
 // sha and size are the tree entry's; repoPath is repository-relative, for logs and progress.
+// The sink's first byte is the blob's byte at offset.
 struct SyncFetchRequest {
   const uint8_t* sha;
   uint64_t size;
   const char* repoPath;
+  uint64_t offset = 0;
 };
 
 // write returns false when the bytes cannot be stored or exceed the declared size; the fetch then stops.
@@ -94,6 +101,9 @@ struct SyncExecutorCallbacks {
   // Idempotent; false is fatal.
   bool (*bookMoved)(void* ctx, const char* oldAbsPath, const char* newAbsPath);
   void (*onProgress)(void* ctx, const SyncProgress& progress);
+  // Feeds the next length bytes of file into hasher; false on a short read. Null discards an interrupted download
+  // instead of resuming it.
+  bool (*hashPrefix)(void* ctx, SyncFile& file, uint64_t length, GitBlobHasher& hasher) = nullptr;
 };
 
 // Applies the planner's operations to the card. One executor per sync: prepare(), then apply(), or
@@ -114,9 +124,13 @@ class SyncExecutor {
   // and compacts the manifest's journal. Call before the planner exists.
   SyncRunResult prepare();
 
-  // begin(), the planner's plan over the manifest and tree.tmp through sink(), then end(). Call after a
-  // successful prepare(), once tree.tmp is written.
+  // planInto() then runPlanned(). Call after a successful prepare(), once tree.tmp is written.
   SyncRunResult apply(SyncPlanner& planner);
+  // begin(), then the planner's operations written to ops.tmp. Ok means the planner may be freed and runPlanned()
+  // called; any other status already ended the run.
+  SyncRunResult planInto(SyncPlanner& planner);
+  // Runs the operations of ops.tmp through sink(), then end(); ops.tmp is gone when it returns.
+  SyncRunResult runPlanned();
 
   // Opens the manifest and the tree for operations; false with the reason in end()'s result.
   bool begin();
@@ -152,6 +166,11 @@ class SyncExecutor {
   SyncOpOutcome dropTemp(SyncOpOutcome outcome);
   SyncOpOutcome fatal(const char* what, const char* path);
   SyncOpOutcome fetchIntoTemp();
+  uint64_t heldBytes();
+  bool startTemp();
+  bool readHeldId(uint8_t sha[GitBlobHasher::SHA_SIZE], uint64_t& size);
+  bool removeHeldDownload();
+  SyncRunStatus checkHeldDownload();
   SyncOpOutcome journalPut(uint32_t replaces);
   SyncOpOutcome journalFlush();
   bool clearCache(const char* absPath);
@@ -167,6 +186,9 @@ class SyncExecutor {
   static bool sinkOp(void* ctx, const SyncOp& op);
   static void sinkTotal(void* ctx, uint32_t totalOps);
   static bool sinkWrite(void* ctx, const uint8_t* data, size_t len);
+  static bool spoolOp(void* ctx, const SyncOp& op);
+  static void spoolTotal(void* ctx, uint32_t totalOps);
+  SyncRunResult planFailure(const SyncPlanResult& planned);
 
   SyncStorage& storage;
   SyncExecutorCallbacks callbacks;
@@ -174,6 +196,9 @@ class SyncExecutor {
   SyncFile* manifestFile = nullptr;
   SyncFile* treeFile = nullptr;
   SyncFile* tempFile = nullptr;
+  // ops.tmp while the planner writes it; the temp's slot, free until the first operation runs.
+  SyncFile* opsFile = nullptr;
+  uint32_t plannedOps = 0;
   std::optional<RecordReader> manifestReader;
   std::optional<RecordReader> treeReader;
   std::optional<RecordWriter> journal;

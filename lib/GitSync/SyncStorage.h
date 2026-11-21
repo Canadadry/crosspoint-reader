@@ -10,7 +10,11 @@ constexpr char SYNC_WORK_DIR[] = "/.crosspoint/gitsync";
 constexpr char SYNC_MANIFEST_PATH[] = "/.crosspoint/gitsync/manifest.bin";
 constexpr char SYNC_MANIFEST_NEW_PATH[] = "/.crosspoint/gitsync/manifest.new";
 constexpr char SYNC_DOWNLOAD_TMP_PATH[] = "/.crosspoint/gitsync/download.tmp";
+// The blob download.tmp holds the first bytes of, so an interrupted download resumes on a later run.
+constexpr char SYNC_DOWNLOAD_ID_PATH[] = "/.crosspoint/gitsync/download.id";
 constexpr char SYNC_TREE_PATH[] = "/.crosspoint/gitsync/tree.tmp";
+// The planned operations, written before the planner is freed and read back while they run.
+constexpr char SYNC_OPS_PATH[] = "/.crosspoint/gitsync/ops.tmp";
 
 enum class SyncOpenMode : uint8_t {
   Read,      // existing file, read-only

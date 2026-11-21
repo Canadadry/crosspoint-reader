@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "BookmarkPath.h"
+#include "Crc32.h"
 #include "ManifestCompactor.h"
 #include "SyncPathFold.h"
 
@@ -17,6 +18,23 @@ constexpr const char* LOG_TAG = "GITEXEC";
 // The cache root every reader passes to bookCacheDir.
 constexpr char BOOK_CACHE_ROOT[] = "/.crosspoint";
 constexpr BookCacheKind BOOK_CACHE_KINDS[] = {BookCacheKind::Epub, BookCacheKind::Txt, BookCacheKind::Xtc};
+
+// download.id: magic, blob SHA, blob size (little-endian), CRC-32 of the bytes before it.
+constexpr uint8_t HELD_ID_MAGIC[4] = {'G', 'S', 'D', '1'};
+constexpr size_t HELD_ID_SHA_AT = sizeof(HELD_ID_MAGIC);
+constexpr size_t HELD_ID_SIZE_AT = HELD_ID_SHA_AT + GitBlobHasher::SHA_SIZE;
+constexpr size_t HELD_ID_CRC_AT = HELD_ID_SIZE_AT + sizeof(uint64_t);
+constexpr size_t HELD_ID_BYTES = HELD_ID_CRC_AT + sizeof(uint32_t);
+
+void putLe(uint8_t* out, uint64_t value, size_t bytes) {
+  for (size_t i = 0; i < bytes; ++i) out[i] = static_cast<uint8_t>(value >> (8 * i));
+}
+
+uint64_t getLe(const uint8_t* in, size_t bytes) {
+  uint64_t value = 0;
+  for (size_t i = 0; i < bytes; ++i) value |= static_cast<uint64_t>(in[i]) << (8 * i);
+  return value;
+}
 
 // An empty buffer names no path; any other must be syncable once its leading '/' is dropped.
 bool isSyncable(const char* absPath) { return absPath[0] == '\0' || isSyncablePath(absPath + 1, strlen(absPath + 1)); }
@@ -61,8 +79,10 @@ SyncRunResult SyncExecutor::prepare() {
     result.status = SyncRunStatus::StorageError;
     return result;
   }
-  if (storage.exists(SYNC_DOWNLOAD_TMP_PATH) && !storage.remove(SYNC_DOWNLOAD_TMP_PATH)) {
-    LOG_ERR(LOG_TAG, "Cannot remove %s", SYNC_DOWNLOAD_TMP_PATH);
+  result.status = checkHeldDownload();
+  if (result.status != SyncRunStatus::Ok) return result;
+  if (storage.exists(SYNC_OPS_PATH) && !storage.remove(SYNC_OPS_PATH)) {
+    LOG_ERR(LOG_TAG, "Cannot remove %s", SYNC_OPS_PATH);
     result.status = SyncRunStatus::StorageError;
     return result;
   }
@@ -80,6 +100,73 @@ SyncRunResult SyncExecutor::prepare() {
   }
   prepared = result.status == SyncRunStatus::Ok;
   return result;
+}
+
+// Keeps download.tmp only beside the id of a blob it can still be the start of.
+SyncRunStatus SyncExecutor::checkHeldDownload() {
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  uint64_t size = 0;
+  uint64_t held = 0;
+  if (readHeldId(sha, size) && storage.fileSize(SYNC_DOWNLOAD_TMP_PATH, held) && held <= size) {
+    return SyncRunStatus::Ok;
+  }
+  return removeHeldDownload() ? SyncRunStatus::Ok : SyncRunStatus::StorageError;
+}
+
+bool SyncExecutor::removeHeldDownload() {
+  for (const char* path : {SYNC_DOWNLOAD_TMP_PATH, SYNC_DOWNLOAD_ID_PATH}) {
+    if (storage.exists(path) && !storage.remove(path)) {
+      LOG_ERR(LOG_TAG, "Cannot remove %s", path);
+      return false;
+    }
+  }
+  return true;
+}
+
+bool SyncExecutor::readHeldId(uint8_t sha[GitBlobHasher::SHA_SIZE], uint64_t& size) {
+  OpenFile file(storage, SYNC_DOWNLOAD_ID_PATH, SyncOpenMode::Read);
+  if (!file.get()) return false;
+  uint8_t id[HELD_ID_BYTES + 1];
+  if (file.get()->read(id, sizeof(id)) != static_cast<int>(HELD_ID_BYTES)) return false;
+  if (memcmp(id, HELD_ID_MAGIC, sizeof(HELD_ID_MAGIC)) != 0 ||
+      getLe(id + HELD_ID_CRC_AT, sizeof(uint32_t)) != Crc32::compute(id, HELD_ID_CRC_AT)) {
+    return false;
+  }
+  memcpy(sha, id + HELD_ID_SHA_AT, GitBlobHasher::SHA_SIZE);
+  size = getLe(id + HELD_ID_SIZE_AT, sizeof(uint64_t));
+  return true;
+}
+
+// The bytes download.tmp holds of the tree entry, already fed to the hasher; 0 when it holds none of it.
+uint64_t SyncExecutor::heldBytes() {
+  uint8_t sha[GitBlobHasher::SHA_SIZE];
+  uint64_t size = 0;
+  uint64_t held = 0;
+  if (!callbacks.hashPrefix || !readHeldId(sha, size) || size != entrySize || memcmp(sha, entrySha, sizeof(sha)) != 0 ||
+      !storage.fileSize(SYNC_DOWNLOAD_TMP_PATH, held) || held == 0 || held > entrySize) {
+    return 0;
+  }
+  OpenFile file(storage, SYNC_DOWNLOAD_TMP_PATH, SyncOpenMode::Read);
+  if (!file.get() || !callbacks.hashPrefix(callbacks.ctx, *file.get(), held, hasher)) {
+    LOG_ERR(LOG_TAG, "Cannot reread the %lu bytes held of %s", static_cast<unsigned long>(held), treePath);
+    hasher.begin(entrySize);
+    return 0;
+  }
+  LOG_INF(LOG_TAG, "Resuming %s at byte %lu", treePath, static_cast<unsigned long>(held));
+  return held;
+}
+
+// Empties download.tmp and names the tree entry as what it holds; the old bytes go before the new id lands.
+bool SyncExecutor::startTemp() {
+  if (!removeHeldDownload()) return false;
+  if (entrySize == 0) return true;
+  uint8_t id[HELD_ID_BYTES];
+  memcpy(id, HELD_ID_MAGIC, sizeof(HELD_ID_MAGIC));
+  memcpy(id + HELD_ID_SHA_AT, entrySha, GitBlobHasher::SHA_SIZE);
+  putLe(id + HELD_ID_SIZE_AT, entrySize, sizeof(uint64_t));
+  putLe(id + HELD_ID_CRC_AT, Crc32::compute(id, HELD_ID_CRC_AT), sizeof(uint32_t));
+  OpenFile file(storage, SYNC_DOWNLOAD_ID_PATH, SyncOpenMode::Truncate);
+  return file.get() && file.get()->write(id, sizeof(id)) && file.get()->flush();
 }
 
 SyncRunStatus SyncExecutor::recoverManifest() {
@@ -243,8 +330,120 @@ bool SyncExecutor::begin() {
 }
 
 SyncRunResult SyncExecutor::apply(SyncPlanner& planner) {
+  const SyncRunResult spooled = planInto(planner);
+  if (spooled.status != SyncRunStatus::Ok) return spooled;
+  return runPlanned();
+}
+
+// One operation in ops.tmp: kind, reason, sourceExists, targetExists, manifestOffset and treeOffset little-endian.
+namespace {
+constexpr size_t OP_RECORD_BYTES = 12;
+constexpr size_t OPS_PER_READ = 16;
+
+void encodeOp(const SyncOp& op, uint8_t out[OP_RECORD_BYTES]) {
+  out[0] = static_cast<uint8_t>(op.kind);
+  out[1] = static_cast<uint8_t>(op.reason);
+  out[2] = op.sourceExists ? 1 : 0;
+  out[3] = op.targetExists ? 1 : 0;
+  for (size_t i = 0; i < 4; ++i) {
+    out[4 + i] = static_cast<uint8_t>(op.manifestOffset >> (8 * i));
+    out[8 + i] = static_cast<uint8_t>(op.treeOffset >> (8 * i));
+  }
+}
+
+SyncOp decodeOp(const uint8_t in[OP_RECORD_BYTES]) {
+  SyncOp op{static_cast<SyncOpKind>(in[0]), static_cast<SyncSkipReason>(in[1]), in[2] != 0, in[3] != 0, 0, 0};
+  for (size_t i = 0; i < 4; ++i) {
+    op.manifestOffset |= static_cast<uint32_t>(in[4 + i]) << (8 * i);
+    op.treeOffset |= static_cast<uint32_t>(in[8 + i]) << (8 * i);
+  }
+  return op;
+}
+}  // namespace
+
+SyncRunResult SyncExecutor::planInto(SyncPlanner& planner) {
   if (!begin()) return result;
-  const SyncPlanResult planned = planner.plan(*manifestFile, *treeFile, &localExists, this, sink());
+  plannedOps = 0;
+  const SyncPlanResult plan =
+      planner.plan(*manifestFile, *treeFile, &localExists, this, SyncOpSink{this, &spoolOp, &spoolTotal});
+  bool flushed = true;
+  if (opsFile) {
+    flushed = opsFile->flush();
+    storage.close(opsFile);
+    opsFile = nullptr;
+  }
+  if (plan.status != SyncPlanStatus::Ok || !flushed || failed) {
+    if (!flushed) {
+      LOG_ERR(LOG_TAG, "Cannot flush %s", SYNC_OPS_PATH);
+      failed = true;
+    }
+    SyncRunResult run = planFailure(plan);
+    if (storage.exists(SYNC_OPS_PATH)) storage.remove(SYNC_OPS_PATH);
+    return run;
+  }
+  SyncRunResult ok = result;
+  ok.recordStatus = plan.readerStatus;
+  return ok;
+}
+
+bool SyncExecutor::spoolOp(void* ctx, const SyncOp& op) {
+  auto* self = static_cast<SyncExecutor*>(ctx);
+  // Opened on the first operation, so a plan that fails or finds nothing to do writes nothing.
+  if (!self->opsFile) self->opsFile = self->storage.open(SYNC_OPS_PATH, SyncOpenMode::Truncate);
+  uint8_t record[OP_RECORD_BYTES];
+  encodeOp(op, record);
+  if (!self->opsFile || !self->opsFile->write(record, sizeof(record))) {
+    LOG_ERR(LOG_TAG, "Cannot write %s", SYNC_OPS_PATH);
+    self->failed = true;
+    return false;
+  }
+  ++self->plannedOps;
+  return true;
+}
+
+void SyncExecutor::spoolTotal(void* ctx, uint32_t totalOps) { static_cast<SyncExecutor*>(ctx)->total = totalOps; }
+
+// Reads ops.tmp a few records at a time, so the temp's slot is free whenever an operation runs.
+SyncRunResult SyncExecutor::runPlanned() {
+  if (!manifestFile) {
+    LOG_ERR(LOG_TAG, "runPlanned() without planInto()");
+    result.status = SyncRunStatus::NotPrepared;
+    return result;
+  }
+  const SyncOpSink run = sink();
+  uint8_t records[OPS_PER_READ * OP_RECORD_BYTES];
+  for (uint32_t next = 0; next < plannedOps;) {
+    int got;
+    {
+      OpenFile file(storage, SYNC_OPS_PATH, SyncOpenMode::Read);
+      if (!file.get() || !file.get()->seek(next * OP_RECORD_BYTES)) {
+        LOG_ERR(LOG_TAG, "Cannot read %s", SYNC_OPS_PATH);
+        failed = true;
+        break;
+      }
+      got = file.get()->read(records, sizeof(records));
+    }
+    if (got <= 0 || got % OP_RECORD_BYTES != 0) {
+      LOG_ERR(LOG_TAG, "Short read of %s at operation %u", SYNC_OPS_PATH, static_cast<unsigned>(next));
+      failed = true;
+      break;
+    }
+    bool stopped = false;
+    for (int at = 0; at < got && !stopped; at += OP_RECORD_BYTES, ++next) {
+      stopped = !run.onOp(run.ctx, decodeOp(records + at));
+    }
+    if (stopped) break;
+  }
+  SyncRunResult ended = end();
+  if (storage.exists(SYNC_OPS_PATH) && !storage.remove(SYNC_OPS_PATH)) {
+    LOG_ERR(LOG_TAG, "Cannot remove %s", SYNC_OPS_PATH);
+    if (ended.status == SyncRunStatus::Ok) ended.status = SyncRunStatus::StorageError;
+  }
+  return ended;
+}
+
+// Ends the run of a plan that did not complete and maps its status.
+SyncRunResult SyncExecutor::planFailure(const SyncPlanResult& planned) {
   SyncRunResult run = end();
   if (run.status != SyncRunStatus::Ok) return run;
   run.recordStatus = planned.readerStatus;
@@ -312,7 +511,7 @@ void SyncExecutor::closeFiles() {
   manifestReader.reset();
   treeReader.reset();
   journal.reset();
-  for (SyncFile** file : {&tempFile, &treeFile, &manifestFile}) {
+  for (SyncFile** file : {&opsFile, &tempFile, &treeFile, &manifestFile}) {
     if (*file) storage.close(*file);
     *file = nullptr;
   }
@@ -511,6 +710,7 @@ SyncOpOutcome SyncExecutor::land(uint32_t replaces) {
     if (!storage.remove(treePath)) return fatal("Cannot remove", treePath);
   }
   if (!storage.rename(SYNC_DOWNLOAD_TMP_PATH, treePath)) return dropTemp(SyncOpOutcome::TargetUnwritable);
+  if (!removeHeldDownload()) return fatal("Cannot remove", SYNC_DOWNLOAD_ID_PATH);
   return SyncOpOutcome::Applied;
 }
 
@@ -574,17 +774,19 @@ bool SyncExecutor::matchesTree() {
   return callbacks.hashFile(callbacks.ctx, treePath, entrySize, sha) && memcmp(sha, entrySha, sizeof(sha)) == 0;
 }
 
-// Streams the tree entry into the download temp, hashing as it goes; Applied once it is verified.
+// Streams the tree entry into the download temp, after the bytes a previous run left there, hashing as it goes;
+// Applied once it is verified. A failed transfer keeps what arrived for the next attempt.
 SyncOpOutcome SyncExecutor::fetchIntoTemp() {
-  tempFile = storage.open(SYNC_DOWNLOAD_TMP_PATH, SyncOpenMode::Truncate);
-  if (!tempFile) return fatal("Cannot open", SYNC_DOWNLOAD_TMP_PATH);
   hasher.begin(entrySize);
-  fetched = 0;
+  fetched = heldBytes();
+  if (fetched == 0 && !startTemp()) return fatal("Cannot start", SYNC_DOWNLOAD_TMP_PATH);
+  tempFile = storage.open(SYNC_DOWNLOAD_TMP_PATH, fetched > 0 ? SyncOpenMode::Append : SyncOpenMode::Truncate);
+  if (!tempFile) return fatal("Cannot open", SYNC_DOWNLOAD_TMP_PATH);
   tempWriteFailed = false;
   overflow = false;
   bool bodyOk = true;
-  if (entrySize > 0) {
-    const SyncFetchRequest request{entrySha, entrySize, treePath + 1};
+  if (entrySize > fetched) {
+    const SyncFetchRequest request{entrySha, entrySize, treePath + 1, fetched};
     const SyncChunkSink chunkSink{this, &sinkWrite};
     bodyOk = callbacks.fetch && callbacks.fetch(callbacks.ctx, request, chunkSink);
   }
@@ -595,8 +797,8 @@ SyncOpOutcome SyncExecutor::fetchIntoTemp() {
   uint8_t sha[GitBlobHasher::SHA_SIZE];
   const bool sized = hasher.finish(sha);
   if (!bodyOk && !overflow) {
-    LOG_ERR(LOG_TAG, "Fetch failed: %s", treePath);
-    return dropTemp(SyncOpOutcome::FetchFailed);
+    LOG_ERR(LOG_TAG, "Fetch failed: %s, %lu bytes held", treePath, static_cast<unsigned long>(fetched));
+    return fetched > 0 ? fileError(SyncOpOutcome::FetchFailed) : dropTemp(SyncOpOutcome::FetchFailed);
   }
   if (overflow || !sized || memcmp(sha, entrySha, sizeof(sha)) != 0) {
     LOG_ERR(LOG_TAG, "Verification failed: %s", treePath);
@@ -623,9 +825,7 @@ bool SyncExecutor::sinkWrite(void* ctx, const uint8_t* data, size_t len) {
 
 // Abandons the operation as a per-file error; the temp must go, or the card is failing.
 SyncOpOutcome SyncExecutor::dropTemp(SyncOpOutcome outcome) {
-  if (storage.exists(SYNC_DOWNLOAD_TMP_PATH) && !storage.remove(SYNC_DOWNLOAD_TMP_PATH)) {
-    return fatal("Cannot remove", SYNC_DOWNLOAD_TMP_PATH);
-  }
+  if (!removeHeldDownload()) return fatal("Cannot remove", SYNC_DOWNLOAD_TMP_PATH);
   return fileError(outcome);
 }
 
@@ -633,6 +833,9 @@ SyncOpOutcome SyncExecutor::fileError(SyncOpOutcome outcome) {
   LOG_ERR(LOG_TAG, "Operation abandoned: outcome %u, %s", static_cast<unsigned>(outcome),
           treePath[0] != '\0' ? treePath : manifestPath);
   ++result.fileErrors;
+  result.lastFileError = static_cast<uint8_t>(outcome);
+  result.lastFileHeld = outcome == SyncOpOutcome::FetchFailed ? fetched : 0;
+  result.lastFileSize = entrySize;
   return outcome;
 }
 

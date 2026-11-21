@@ -149,7 +149,20 @@ class SyncExecutorTest : public ::testing::Test {
  protected:
   enum class FetchMode : uint8_t { Serve, WrongBytes, ShortBody, ExtraBytes, FailMidStream };
 
-  SyncExecutorCallbacks callbacks() { return {this, &fetchFake, &hashFake, &clearFake, &movedFake, &progressFake}; }
+  SyncExecutorCallbacks callbacks() {
+    return {this, &fetchFake, &hashFake, &clearFake, &movedFake, &progressFake, &hashPrefixFake};
+  }
+
+  static bool hashPrefixFake(void*, SyncFile& file, uint64_t length, GitBlobHasher& hasher) {
+    uint8_t buf[5];
+    while (length > 0) {
+      const int n = file.read(buf, static_cast<size_t>(std::min<uint64_t>(sizeof(buf), length)));
+      if (n <= 0) return false;
+      hasher.update(buf, static_cast<size_t>(n));
+      length -= static_cast<uint64_t>(n);
+    }
+    return true;
+  }
 
   std::unique_ptr<SyncExecutor> makeExecutor() { return makeUniqueNoThrow<SyncExecutor>(storage, callbacks()); }
 
@@ -160,6 +173,7 @@ class SyncExecutorTest : public ::testing::Test {
     auto* self = static_cast<SyncExecutorTest*>(ctx);
     const std::string key = hex(request.sha);
     self->fetches[key]++;
+    self->fetchOffsets.push_back(request.offset);
     const auto it = self->blobs.find(key);
     if (it == self->blobs.end()) return false;
     std::string body = it->second;
@@ -178,7 +192,7 @@ class SyncExecutorTest : public ::testing::Test {
         break;
     }
     const size_t stopAt = self->fetchMode == FetchMode::FailMidStream ? body.size() / 2 : body.size();
-    for (size_t pos = 0; pos < stopAt; pos += 3) {
+    for (size_t pos = request.offset; pos < stopAt; pos += 3) {
       const size_t len = std::min<size_t>(3, stopAt - pos);
       if (!sink.write(sink.ctx, reinterpret_cast<const uint8_t*>(body.data()) + pos, len)) return false;
     }
@@ -266,6 +280,7 @@ class SyncExecutorTest : public ::testing::Test {
   MemorySyncStorage storage;
   std::map<std::string, std::string> blobs;
   std::map<std::string, int> fetches;
+  std::vector<uint64_t> fetchOffsets;
   FetchMode fetchMode = FetchMode::Serve;
   std::vector<std::string> cleared;
   bool clearResult = true;

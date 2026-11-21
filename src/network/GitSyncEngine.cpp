@@ -65,6 +65,8 @@ const char* describeDownloadError(HttpDownloader::DownloadError error) {
       return "aborted";
     case HttpDownloader::REDIRECT_REFUSED:
       return "redirect refused";
+    case HttpDownloader::RANGE_REFUSED:
+      return "range refused";
   }
   return "unknown";
 }
@@ -100,6 +102,20 @@ struct EngineContext {
   const SyncChunkSink* sink = nullptr;
   // The caller answered false once: a refused body is then the run stopping, not a failure.
   bool cancelRequested = false;
+  Diagnostics diagnostics;
+
+  // Free heap on every chunk; the largest block, which walks the free list, on every 16th.
+  void sampleHeap(uint32_t chunk) {
+    const uint32_t free = ESP.getFreeHeap();
+    if (diagnostics.transferMinFreeHeap == 0 || free < diagnostics.transferMinFreeHeap) {
+      diagnostics.transferMinFreeHeap = free;
+    }
+    if (chunk % 16 != 0) return;
+    const uint32_t block = ESP.getMaxAllocHeap();
+    if (diagnostics.transferMinLargestBlock == 0 || block < diagnostics.transferMinLargestBlock) {
+      diagnostics.transferMinLargestBlock = block;
+    }
+  }
 };
 
 static_assert(GIT_SYNC_RUN_STATE_MAX_BYTES + sizeof(EngineContext) <=
@@ -113,22 +129,36 @@ bool onProgress(void* ctx, const GitSyncProgress& progress) {
   return false;
 }
 
-// The only caller of HttpDownloader::fetchStream. url holds the request's URL.
-GitFetchStatus fetch(EngineContext& self, const SyncChunkSink& sink, const char* accept, const char* what) {
+HttpDownloader::RequestOptions acceptOptions(const char* accept) {
   HttpDownloader::RequestOptions options;
   options.headerName = "Accept";
   options.headerValue = accept;
   options.refuseCrossOriginRedirect = true;
+  return options;
+}
 
+// The only caller of HttpDownloader::fetchStream. url holds the request's URL.
+// failure, when set, records a failed request.
+GitFetchStatus fetch(EngineContext& self, const SyncChunkSink& sink, HttpDownloader::RequestOptions options,
+                     const char* what, BlobFetchFailure* failure = nullptr) {
+  int status = 0;
+  options.statusOut = &status;
   self.sink = &sink;
   EngineContext* const ctx = &self;
+  const bool sampleHeap = failure != nullptr;
+  uint32_t chunks = 0;
   const HttpDownloader::DownloadError error = HttpDownloader::fetchStream(
-      self.url, [ctx](const uint8_t* data, size_t len) { return ctx->sink->write(ctx->sink->ctx, data, len); },
+      self.url,
+      [ctx, sampleHeap, &chunks](const uint8_t* data, size_t len) {
+        if (sampleHeap) ctx->sampleHeap(chunks++);
+        return ctx->sink->write(ctx->sink->ctx, data, len);
+      },
       GITHUB_BASIC_AUTH_USER, self.password, options);
   self.sink = nullptr;
 
   if (error != HttpDownloader::OK) {
-    LOG_ERR(LOG_TAG, "%s fetch failed: %s", what, describeDownloadError(error));
+    LOG_ERR(LOG_TAG, "%s fetch failed: %s, status %d", what, describeDownloadError(error), status);
+    if (failure) *failure = BlobFetchFailure{static_cast<uint8_t>(error), static_cast<int16_t>(status)};
   }
   switch (error) {
     case HttpDownloader::OK:
@@ -141,6 +171,8 @@ GitFetchStatus fetch(EngineContext& self, const SyncChunkSink& sink, const char*
       return GitFetchStatus::NetworkError;
     case HttpDownloader::ABORTED:
       return GitFetchStatus::Aborted;
+    case HttpDownloader::RANGE_REFUSED:
+      return GitFetchStatus::RangeRefused;
   }
   return GitFetchStatus::NetworkError;
 }
@@ -152,17 +184,34 @@ GitFetchStatus fetchTree(void* ctx, const SyncChunkSink& sink) {
     return GitFetchStatus::Failed;
   }
   self->url.assign(self->urlBuffer);
-  return fetch(*self, sink, GITHUB_ACCEPT_JSON, "Tree");
+  return fetch(*self, sink, acceptOptions(GITHUB_ACCEPT_JSON), "Tree");
+}
+
+// The API ignores Range, so a resumed blob comes from the raw host by path on the branch; the run verifies the
+// result against the blob SHA. Whatever stops that path makes the run fetch the blob whole from the API instead.
+GitFetchStatus fetchBlobFrom(EngineContext& self, const SyncFetchRequest& request, const SyncChunkSink& sink) {
+  if (!formatRawUrl(self.urlBuffer, sizeof(self.urlBuffer), self.config, request.repoPath)) {
+    LOG_ERR(LOG_TAG, "Raw URL does not fit for %s", request.repoPath);
+    self.diagnostics.ranged = BlobFetchFailure{RAW_URL_TOO_LONG, 0};
+    return GitFetchStatus::RangeRefused;
+  }
+  self.url.assign(self.urlBuffer);
+  HttpDownloader::RequestOptions options;
+  options.refuseCrossOriginRedirect = true;
+  options.rangeStart = request.offset;
+  const GitFetchStatus fetched = fetch(self, sink, options, "Ranged blob", &self.diagnostics.ranged);
+  return fetched == GitFetchStatus::RedirectRefused ? GitFetchStatus::RangeRefused : fetched;
 }
 
 GitFetchStatus fetchBlob(void* ctx, const SyncFetchRequest& request, const SyncChunkSink& sink) {
   auto* self = static_cast<EngineContext*>(ctx);
+  if (request.offset > 0) return fetchBlobFrom(*self, request, sink);
   if (!formatBlobUrl(self->urlBuffer, sizeof(self->urlBuffer), self->config, request.sha)) {
     LOG_ERR(LOG_TAG, "Cannot build the blob URL");
     return GitFetchStatus::Failed;
   }
   self->url.assign(self->urlBuffer);
-  return fetch(*self, sink, GITHUB_ACCEPT_RAW, "Blob");
+  return fetch(*self, sink, acceptOptions(GITHUB_ACCEPT_RAW), "Blob", &self->diagnostics.api);
 }
 
 // The executor already moved the book, its caches and its bookmarks; only the stores follow here, saved before the
@@ -220,7 +269,7 @@ GitSyncReport failed(GitSyncError error) {
 
 }  // namespace
 
-GitSyncReport run(const GitSyncConfig& config, const GitSyncProgressSink& progress) {
+GitSyncReport run(const GitSyncConfig& config, const GitSyncProgressSink& progress, Diagnostics* diagnostics) {
   if (config.token[0] == '\0') {
     LOG_ERR(LOG_TAG, "No token in the config");
     return failed(GitSyncError::TreeDownloadFailed);
@@ -248,6 +297,7 @@ GitSyncReport run(const GitSyncConfig& config, const GitSyncProgressSink& progre
   const GitSyncProgressSink sink{ctx.get(), &onProgress};
   const GitSyncReport report = runGitSync(ctx->storage, transport, hooks, sink);
   logReport(report);
+  if (diagnostics) *diagnostics = ctx->diagnostics;
   return report;
 }
 
