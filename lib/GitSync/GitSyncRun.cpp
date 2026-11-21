@@ -242,13 +242,15 @@ class SyncRun {
     return false;
   }
 
-  // A server that cannot start at from serves the whole blob instead, and the bytes before from are dropped.
+  // A ranged fetch that is refused, or fails before its first byte, falls back to the whole blob, and the bytes
+  // before from are dropped: the ranged path never does worse than a fetch from byte 0.
   GitFetchStatus fetchBlobFrom(SyncFetchRequest& attempt, uint64_t from) {
     attempt.offset = from;
     const GitFetchStatus fetched = transport.fetchBlob(transport.ctx, attempt, SyncChunkSink{this, &blobChunk});
-    if (fetched != GitFetchStatus::RangeRefused || from == 0) return fetched;
-    LOG_INF(LOG_TAG, "Range refused for %s: fetching it whole, skipping %lu bytes", attempt.repoPath,
-            static_cast<unsigned long>(from));
+    const bool failedBeforeAByte = fetched == GitFetchStatus::NetworkError && blobDelivered == from;
+    if (from == 0 || (fetched != GitFetchStatus::RangeRefused && !failedBeforeAByte)) return fetched;
+    LOG_INF(LOG_TAG, "Ranged fetch of %s ended with status %u: fetching it whole, skipping %lu bytes", attempt.repoPath,
+            static_cast<unsigned>(fetched), static_cast<unsigned long>(from));
     attempt.offset = 0;
     blobSkip = from;
     const GitFetchStatus whole = transport.fetchBlob(transport.ctx, attempt, SyncChunkSink{this, &blobChunk});

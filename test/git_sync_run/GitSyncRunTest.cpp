@@ -210,6 +210,7 @@ class GitSyncRunTest : public ::testing::Test {
     }
     self->blobOffsets.push_back(request.offset);
     if (self->refuseRanges && request.offset > 0) return GitFetchStatus::RangeRefused;
+    if (self->failRanges && request.offset > 0) return GitFetchStatus::NetworkError;
     const auto it = self->blobs.find(key);
     if (it == self->blobs.end()) return GitFetchStatus::NetworkError;
     size_t cutAt = SIZE_MAX;
@@ -296,6 +297,8 @@ class GitSyncRunTest : public ::testing::Test {
   size_t blobBytesServed = 0;
   // Answers RangeRefused to every fetch that does not start at byte 0.
   bool refuseRanges = false;
+  // Answers NetworkError, without a byte, to every fetch that does not start at byte 0.
+  bool failRanges = false;
   size_t bytesServed = 0;
   std::vector<Progress> progress;
   size_t cancelAt = 0;
@@ -594,26 +597,28 @@ TEST_F(GitSyncRunTest, ResumesStopAfterMaxBlobResumesAndTheFileIsRetriedNextRun)
 
 TEST_F(GitSyncRunTest, ATransferWithoutProgressIsNotResumed) {
   singleBigBook(1000);
-  blobDrops = {300, 300};
+  blobDrops = {300, 300, 300};
 
   const GitSyncReport report = run();
 
   EXPECT_EQ(report.run.fileErrors, 1u);
-  EXPECT_EQ(blobOffsets, (std::vector<uint64_t>{0, 300}));
+  // The ranged fetch gave nothing, so the whole blob was fetched; it stopped at the same byte and the file gave up.
+  EXPECT_EQ(blobOffsets, (std::vector<uint64_t>{0, 300, 0}));
 }
 
 TEST_F(GitSyncRunTest, ADownloadCutOffInOneRunResumesInTheNextWithoutRefetchingItsStart) {
   const std::string book = singleBigBook(10000);
-  blobDrops = {3000, 3000};
+  blobDrops = {3000, 3000, 3000};
   ASSERT_EQ(run().run.fileErrors, 1u);
   blobOffsets.clear();
+  blobBytesServed = 0;
 
   const GitSyncReport report = run();
 
   EXPECT_EQ(report.error, GitSyncError::Ok);
   EXPECT_EQ(report.run.added, 1u);
   EXPECT_EQ(blobOffsets, (std::vector<uint64_t>{3000}));
-  EXPECT_EQ(blobBytesServed, book.size());
+  EXPECT_EQ(blobBytesServed, book.size() - 3000);
   EXPECT_EQ(bookFiles(storage), (std::map<std::string, std::string>{{"/Big.epub", book}}));
   EXPECT_FALSE(storage.exists(SYNC_DOWNLOAD_TMP_PATH));
 }
@@ -622,6 +627,19 @@ TEST_F(GitSyncRunTest, ARangeTheServerRefusesFallsBackToTheWholeBlobSkippingWhat
   const std::string book = singleBigBook(1000);
   blobDrops = {300};
   refuseRanges = true;
+
+  const GitSyncReport report = run();
+
+  EXPECT_EQ(report.error, GitSyncError::Ok);
+  EXPECT_EQ(report.run.fileErrors, 0u);
+  EXPECT_EQ(bookFiles(storage), (std::map<std::string, std::string>{{"/Big.epub", book}}));
+  EXPECT_EQ(blobOffsets, (std::vector<uint64_t>{0, 300, 0}));
+}
+
+TEST_F(GitSyncRunTest, ARangedFetchFailingWithoutAByteFallsBackToTheWholeBlob) {
+  const std::string book = singleBigBook(1000);
+  blobDrops = {300};
+  failRanges = true;
 
   const GitSyncReport report = run();
 
