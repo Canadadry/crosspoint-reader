@@ -242,6 +242,27 @@ TEST_F(SyncExecutorTest, FetchFailingMidStreamLeavesTheTargetAloneAndKeepsTheByt
   EXPECT_TRUE(liveEntries(storage).empty());
 }
 
+TEST_F(SyncExecutorTest, LastFileErrorNamesItsOutcomeAndTheBytesHeldOfTheBlob) {
+  fetchMode = FetchMode::FailMidStream;
+  auto executor = begin({{"a.epub", "a longer remote body"}});
+  executor->execute(makeOp(SyncOpKind::Download, NO_OFFSET, treeOffsets[0]));
+  SyncRunResult result = executor->end();
+
+  EXPECT_EQ(result.lastFileError, static_cast<uint8_t>(SyncOpOutcome::FetchFailed));
+  EXPECT_EQ(result.lastFileHeld, 10u);
+  EXPECT_EQ(result.lastFileSize, 20u);
+
+  fetchMode = FetchMode::WrongBytes;
+  storage = MemorySyncStorage();
+  executor = begin({{"a.epub", "a longer remote body"}});
+  executor->execute(makeOp(SyncOpKind::Download, NO_OFFSET, treeOffsets[0]));
+  result = executor->end();
+
+  EXPECT_EQ(result.lastFileError, static_cast<uint8_t>(SyncOpOutcome::VerifyFailed));
+  EXPECT_EQ(result.lastFileHeld, 0u);
+  EXPECT_EQ(result.lastFileSize, 20u);
+}
+
 TEST_F(SyncExecutorTest, NextRunFetchesOnlyWhatTheInterruptedDownloadLacked) {
   fetchMode = FetchMode::FailMidStream;
   auto executor = begin({{"a.epub", "a longer remote body"}});

@@ -20,6 +20,7 @@
 #include "fontIds.h"
 #include "network/GitSyncConfigLoader.h"
 #include "network/GitSyncEngine.h"
+#include "util/GitSyncErrorCode.h"
 #include "util/TaskWatchdog.h"
 
 namespace {
@@ -240,8 +241,9 @@ void GitSyncActivity::runSync() {
           static_cast<unsigned>(ESP.getMaxAllocHeap()));
   lastPublishMs = millis();
 
+  git_sync_engine::Diagnostics runDiagnostics;
   const GitSyncReport result =
-      git_sync_engine::run(config, GitSyncProgressSink{this, &GitSyncActivity::onSyncProgress});
+      git_sync_engine::run(config, GitSyncProgressSink{this, &GitSyncActivity::onSyncProgress}, &runDiagnostics);
   // No rerun from this activity, so the token is not needed any more.
   wipeConfig();
 
@@ -253,6 +255,7 @@ void GitSyncActivity::runSync() {
   {
     RenderLock lock(*this);
     report = result;
+    diagnostics = runDiagnostics;
     state = State::Done;
   }
   if (goHomeAfterRun) {
@@ -423,6 +426,22 @@ void GitSyncActivity::renderDone(LineStack& lines) const {
   const uint32_t skipped = run.skippedCaseCollision + run.skippedUnsafeName;
   if (skipped != 0) {
     snprintf(line, sizeof(line), tr(STR_GIT_SYNC_SKIPPED_FORMAT), static_cast<unsigned>(skipped));
+    drawLine(lines, line);
+  }
+  if (report.error != GitSyncError::Ok || run.fileErrors != 0) {
+    GitSyncCodeInputs in;
+    in.runError = static_cast<uint8_t>(report.error);
+    in.fileError = run.lastFileError;
+    in.fileHeld = run.lastFileHeld;
+    in.fileSize = run.lastFileSize;
+    in.apiError = diagnostics.api.error;
+    in.apiStatus = diagnostics.api.status;
+    in.rangedError = diagnostics.ranged.error;
+    in.rangedStatus = diagnostics.ranged.status;
+    in.lowestFreeHeap = lowestFreeHeap;
+    char code[GIT_SYNC_CODE_CAPACITY];
+    formatGitSyncCode(code, sizeof(code), in);
+    snprintf(line, sizeof(line), tr(STR_GIT_SYNC_CODE_FORMAT), code);
     drawLine(lines, line);
   }
 }

@@ -716,6 +716,9 @@ SyncOpOutcome SyncExecutor::fileError(SyncOpOutcome outcome) {
   LOG_ERR(LOG_TAG, "Operation abandoned: outcome %u, %s", static_cast<unsigned>(outcome),
           treePath[0] != '\0' ? treePath : manifestPath);
   ++result.fileErrors;
+  result.lastFileError = static_cast<uint8_t>(outcome);
+  result.lastFileHeld = outcome == SyncOpOutcome::FetchFailed ? fetched : 0;
+  result.lastFileSize = entrySize;
   return outcome;
 }
 

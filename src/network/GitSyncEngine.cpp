@@ -102,6 +102,7 @@ struct EngineContext {
   const SyncChunkSink* sink = nullptr;
   // The caller answered false once: a refused body is then the run stopping, not a failure.
   bool cancelRequested = false;
+  Diagnostics diagnostics;
 };
 
 static_assert(GIT_SYNC_RUN_STATE_MAX_BYTES + sizeof(EngineContext) <=
@@ -124,8 +125,11 @@ HttpDownloader::RequestOptions acceptOptions(const char* accept) {
 }
 
 // The only caller of HttpDownloader::fetchStream. url holds the request's URL.
-GitFetchStatus fetch(EngineContext& self, const SyncChunkSink& sink, const HttpDownloader::RequestOptions& options,
-                     const char* what) {
+// failure, when set, records a failed request.
+GitFetchStatus fetch(EngineContext& self, const SyncChunkSink& sink, HttpDownloader::RequestOptions options,
+                     const char* what, BlobFetchFailure* failure = nullptr) {
+  int status = 0;
+  options.statusOut = &status;
   self.sink = &sink;
   EngineContext* const ctx = &self;
   const HttpDownloader::DownloadError error = HttpDownloader::fetchStream(
@@ -134,7 +138,8 @@ GitFetchStatus fetch(EngineContext& self, const SyncChunkSink& sink, const HttpD
   self.sink = nullptr;
 
   if (error != HttpDownloader::OK) {
-    LOG_ERR(LOG_TAG, "%s fetch failed: %s", what, describeDownloadError(error));
+    LOG_ERR(LOG_TAG, "%s fetch failed: %s, status %d", what, describeDownloadError(error), status);
+    if (failure) *failure = BlobFetchFailure{static_cast<uint8_t>(error), static_cast<int16_t>(status)};
   }
   switch (error) {
     case HttpDownloader::OK:
@@ -168,13 +173,14 @@ GitFetchStatus fetchTree(void* ctx, const SyncChunkSink& sink) {
 GitFetchStatus fetchBlobFrom(EngineContext& self, const SyncFetchRequest& request, const SyncChunkSink& sink) {
   if (!formatRawUrl(self.urlBuffer, sizeof(self.urlBuffer), self.config, request.repoPath)) {
     LOG_ERR(LOG_TAG, "Raw URL does not fit for %s", request.repoPath);
+    self.diagnostics.ranged = BlobFetchFailure{RAW_URL_TOO_LONG, 0};
     return GitFetchStatus::RangeRefused;
   }
   self.url.assign(self.urlBuffer);
   HttpDownloader::RequestOptions options;
   options.refuseCrossOriginRedirect = true;
   options.rangeStart = request.offset;
-  const GitFetchStatus fetched = fetch(self, sink, options, "Ranged blob");
+  const GitFetchStatus fetched = fetch(self, sink, options, "Ranged blob", &self.diagnostics.ranged);
   return fetched == GitFetchStatus::RedirectRefused ? GitFetchStatus::RangeRefused : fetched;
 }
 
@@ -186,7 +192,7 @@ GitFetchStatus fetchBlob(void* ctx, const SyncFetchRequest& request, const SyncC
     return GitFetchStatus::Failed;
   }
   self->url.assign(self->urlBuffer);
-  return fetch(*self, sink, acceptOptions(GITHUB_ACCEPT_RAW), "Blob");
+  return fetch(*self, sink, acceptOptions(GITHUB_ACCEPT_RAW), "Blob", &self->diagnostics.api);
 }
 
 // The executor already moved the book, its caches and its bookmarks; only the stores follow here, saved before the
@@ -244,7 +250,7 @@ GitSyncReport failed(GitSyncError error) {
 
 }  // namespace
 
-GitSyncReport run(const GitSyncConfig& config, const GitSyncProgressSink& progress) {
+GitSyncReport run(const GitSyncConfig& config, const GitSyncProgressSink& progress, Diagnostics* diagnostics) {
   if (config.token[0] == '\0') {
     LOG_ERR(LOG_TAG, "No token in the config");
     return failed(GitSyncError::TreeDownloadFailed);
@@ -272,6 +278,7 @@ GitSyncReport run(const GitSyncConfig& config, const GitSyncProgressSink& progre
   const GitSyncProgressSink sink{ctx.get(), &onProgress};
   const GitSyncReport report = runGitSync(ctx->storage, transport, hooks, sink);
   logReport(report);
+  if (diagnostics) *diagnostics = ctx->diagnostics;
   return report;
 }
 

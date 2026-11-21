@@ -42,6 +42,11 @@ struct SyncRunResult {
   uint32_t skippedUnsafeName = 0;
   // Operations abandoned with the manifest unchanged; the next run retries them.
   uint32_t fileErrors = 0;
+  // The last abandoned operation: its SyncOpOutcome (0 when none), the bytes of the blob held for the next run
+  // after a failed fetch, and the blob's size.
+  uint8_t lastFileError = 0;
+  uint64_t lastFileHeld = 0;
+  uint64_t lastFileSize = 0;
   // Reading state left in place because the destination already held its own.
   uint32_t stateConflicts = 0;
   // Directories removed because a sync emptied them.

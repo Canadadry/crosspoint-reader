@@ -136,6 +136,7 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
         },
         [&sink]() { return sink.cancelFlag && *sink.cancelFlag; });
 
+    if (sink.options.statusOut) *sink.options.statusOut = status;
     if (http.aborted()) return HttpDownloader::ABORTED;
     if (rangeRefused) {
       LOG_ERR("HTTP", "wolfSSL range refused: status %d, content-range '%s'", http.getStatus(),
@@ -258,6 +259,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
     status = esp_http_client_get_status_code(client);
   }
 
+  if (sink.options.statusOut) *sink.options.statusOut = status;
   if (status != 200) {
     LOG_ERR("HTTP", "unexpected status: %d", status);
     esp_http_client_cleanup(client);
