@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <GfxRenderer.h>
+#include <HalStorage.h>
 #include <I18n.h>
 #include <Memory.h>
 #include <WiFi.h>
@@ -22,6 +23,19 @@
 #include "util/TaskWatchdog.h"
 
 namespace {
+
+// The last log lines of a sync that left a failure, readable on the device in the text reader.
+constexpr char SYNC_LOG_PATH[] = "/gitsync-log.txt";
+
+void saveSyncLog() {
+  const std::string logs = getLastLogs();
+  HalFile file;
+  if (!Storage.openFileForWrite("GSYNC", SYNC_LOG_PATH, file)) {
+    LOG_ERR("GSYNC", "Cannot write %s", SYNC_LOG_PATH);
+    return;
+  }
+  if (file.write(logs.data(), logs.size()) != logs.size()) LOG_ERR("GSYNC", "Short write to %s", SYNC_LOG_PATH);
+}
 
 // Volatile stores so the wipe of the token is not dropped as a dead store.
 void wipe(void* data, const size_t len) {
@@ -219,6 +233,8 @@ void GitSyncActivity::runSync() {
   }
   requestUpdateAndWait();
 
+  // The ring then holds this run only, for saveSyncLog().
+  clearLastLogs();
   lowestFreeHeap = ESP.getFreeHeap();
   LOG_INF("GSYNC", "Heap before sync: free %u, largest block %u", static_cast<unsigned>(lowestFreeHeap),
           static_cast<unsigned>(ESP.getMaxAllocHeap()));
@@ -232,6 +248,7 @@ void GitSyncActivity::runSync() {
   LOG_INF("GSYNC", "Lowest free heap during sync: %u", static_cast<unsigned>(lowestFreeHeap));
   LOG_INF("GSYNC", "Loop task stack high-water mark: %u bytes",
           static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+  if (result.error != GitSyncError::Ok || result.run.fileErrors > 0) saveSyncLog();
 
   {
     RenderLock lock(*this);
